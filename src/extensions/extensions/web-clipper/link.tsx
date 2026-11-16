@@ -1,5 +1,6 @@
 import { ToolExtension } from '@/extensions/common';
 import localeService from '@/common/locales';
+import { countWords, extractTemplateVariables, getDate, getTime } from './templateVariables';
 
 export default class Link extends ToolExtension<any> {
   constructor() {
@@ -8,7 +9,7 @@ export default class Link extends ToolExtension<any> {
         extensionId: 'link',
         name: 'Link',
         icon: 'link',
-        version: '0.0.2',
+        version: '0.0.3',
         automatic: true,
         description: 'Add link at the end of the document.',
         config: {
@@ -50,16 +51,19 @@ export default class Link extends ToolExtension<any> {
 			},
       {
         run: async context => {
-          return {
-            TITLE: context.document.title,
-            URL: context.document.URL,
-          };
+          return extractTemplateVariables(context.document);
         },
         afterRun: async context => {
           const config: { template: string } = context.config!;
           return localeService.format(
             { id: 'plugin.link', defaultMessage: config.template },
-            { DOCUMENT: context.data, TITLE: context.result.TITLE, URL: context.result.URL }
+            {
+              ...context.result,
+              DATE: getDate(),
+              TIME: getTime(),
+              WORDS: `${countWords(context.data)}`,
+              DOCUMENT: context.data,
+            }
           );
         },
       }
