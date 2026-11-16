@@ -1,9 +1,9 @@
 import { IExtensionWithId, ToolExtension, TextExtension } from './common';
 import { IContextMenuExtensionFactory } from './contextMenus';
 
-const context = require.context('./extensions', true, /\.(ts|tsx)$/);
+const context = require.context('./extensions', true, /(?<!\.test)\.(ts|tsx)$/);
 
-const contextMenusContext = require.context('./contextMenus', true, /\.(ts|tsx)$/);
+const contextMenusContext = require.context('./contextMenus', true, /(?<!\.test)\.(ts|tsx)$/);
 
 export const contextMenus = contextMenusContext.keys().map(key => {
   const ContextMenuExtensionFactory: IContextMenuExtensionFactory = contextMenusContext(key)
