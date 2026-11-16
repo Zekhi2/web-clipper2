@@ -45,7 +45,7 @@ class ExtensionContainer implements IExtensionContainer {
       }
       return {
         ...extensionInstance,
-        manifest: getLocaleExtensionManifest(extensionInstance.manifest, locale),
+        manifest: getLocaleExtensionManifest(extensionInstance.manifest || {}, locale),
       };
     });
     this.extensions = internalExtensions;

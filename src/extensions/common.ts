@@ -212,7 +212,7 @@ export interface IContextMenusWithId {
 }
 
 export function getLocaleExtensionManifest(manifest: IExtensionManifest, locale: string) {
-  const { i18nManifest, ...rest } = manifest;
+  const { i18nManifest, ...rest } = manifest || {};
   let localeManifest = {};
   if (i18nManifest && typeof i18nManifest === 'object') {
     localeManifest = i18nManifest[locale];
