@@ -32,8 +32,7 @@ import { routerRedux } from 'dva';
 import { localStorageService, syncStorageService } from '@/common/chrome/storage';
 import { initAccounts } from '@/actions/account';
 import copyToClipboard from 'copy-to-clipboard';
-import remark from 'remark';
-import remakPangu from '@web-clipper/remark-pangu';
+import { processPanguWithRemark } from '@/common/pangu';
 import { IExtensionService } from '@/service/common/extension';
 
 const { message } = antd;
@@ -217,10 +216,7 @@ builder
       URL.revokeObjectURL(aTag.href);
     }
     async function pangu(document: string): Promise<string> {
-      const result = await remark()
-        .use(remakPangu)
-        .process(document);
-      return result.contents as string;
+      return processPanguWithRemark(document);
     }
     if (afterRun) {
       try {
