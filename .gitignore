@@ -14,3 +14,28 @@ webclipper.zip
 
 .now
 release
+
+# === Cross-Harness AI Agent Artifacts ===
+# 1. 跨工具接力用的临时 Plan 与任务草稿
+PLAN.md
+agent.md
+task.md
+TODO.md
+BUGS.md
+.plans/
+.agent/skills/*
+
+# 2. 各 Harness 的本机私有配置覆盖
+opencode.local.json
+opencode.local.jsonc
+.mcp.json
+AGENTS.local.md
+
+# 3. 各 Harness 的依赖缓存、日志与本地索引
+.opencode/node_modules/
+.opencode/.cache/
+.opencode/logs/
+.cursor/index/
+
+# 4. 隔离并行开发用的 Git Worktree 目录
+.worktrees/
