@@ -2,6 +2,7 @@ import md5 from '@web-clipper/shared/lib/md5';
 import copyToClipboard from 'copy-to-clipboard';
 import { CreateDocumentRequest, DocumentService } from '../../index';
 import { ObsidianFormConfig } from './interface';
+import { sanitizeFilename } from './sanitizeFilename';
 import QueryString from 'query-string';
 
 /**
@@ -39,7 +40,8 @@ export default class ObsidianService implements DocumentService {
   };
 
   createDocument = async (info: CreateDocumentRequest) => {
-    const file = `${info.repositoryId}/${info.title}`;
+    const title = sanitizeFilename(info.title, this.config.sanitize);
+    const file = `${info.repositoryId}/${title}`;
     const query = {
       silent: true,
       vault: this.config.vault,

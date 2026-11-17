@@ -73,4 +73,37 @@ describe('ObsidianService', () => {
     expect(url).toContain('content=');
     expect(url).not.toContain('clipboard');
   });
+
+  it('sanitizes the note title before building the file path', async () => {
+    const service = new ObsidianService({ vault: 'My Vault', folder: 'clip' });
+    await service.createDocument({
+      repositoryId: 'clip',
+      title: 'C* Garbage collection: "a/b"?',
+      content: SHORT_CONTENT,
+      tags: [],
+      url: 'https://example.com',
+    } as any);
+
+    const url = decodeURIComponent(open.mock.calls[0][0] as string);
+    expect(url).toContain('file=clip/C＊ Garbage collection： ＂a／b＂？');
+    expect(url).not.toContain('"');
+  });
+
+  it('honors the underscore sanitize mode from the account config', async () => {
+    const service = new ObsidianService({
+      vault: 'My Vault',
+      folder: 'clip',
+      sanitize: 'underscore',
+    });
+    await service.createDocument({
+      repositoryId: 'clip',
+      title: 'a:b',
+      content: SHORT_CONTENT,
+      tags: [],
+      url: 'https://example.com',
+    } as any);
+
+    const url = decodeURIComponent(open.mock.calls[0][0] as string);
+    expect(url).toContain('file=clip/a_b');
+  });
 });
