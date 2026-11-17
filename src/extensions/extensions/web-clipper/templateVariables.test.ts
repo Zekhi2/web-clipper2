@@ -170,7 +170,7 @@ describe('extractTemplateVariables', () => {
     expect(variables.SITE).toBe('How to Build X');
   });
 
-  it('guesses the site name from a two-segment title prefix', () => {
+  it('guesses the site name from the title prefix', () => {
     const variables = extractTemplateVariables(
       fakeDocument({ title: '少数派 | 一篇非常非常非常长的文章标题已经超过了二十个字符的限制' })
     );
@@ -182,17 +182,32 @@ describe('extractTemplateVariables', () => {
     expect(english.SITE).toBe('Tech Site');
   });
 
+  it('guesses the site name from the prefix of a three-segment title', () => {
+    // real-world example: https://www.pbs.org/wgbh/nova/proof/wiles.html — no
+    // meta tags, no JSON-LD, no manifest; the site name only appears as the
+    // first title segment
+    const variables = extractTemplateVariables(
+      fakeDocument({ title: 'NOVA Online | The Proof | Solving Fermat: Andrew Wiles' })
+    );
+    expect(variables.SITE).toBe('NOVA Online');
+  });
+
   it('rejects implausible title prefixes', () => {
-    // three segments: not a `Site | Title` pattern
-    expect(
-      extractTemplateVariables(
-        fakeDocument({ title: 'Site | Category | An Extremely Long Article Title Beyond Twenty Characters' })
-      ).SITE
-    ).toBe('');
     // numeric prefix
     expect(
       extractTemplateVariables(
         fakeDocument({ title: '2026 | An Extremely Long Article Title Beyond Twenty Characters' })
+      ).SITE
+    ).toBe('');
+    // prefix ending in a number (report / chapter numbering, not a site name)
+    expect(
+      extractTemplateVariables(
+        fakeDocument({ title: 'Report 2023 | An Extremely Long Article Title Beyond Twenty Chars' })
+      ).SITE
+    ).toBe('');
+    expect(
+      extractTemplateVariables(
+        fakeDocument({ title: 'Chapter 3 | An Extremely Long Article Title Beyond Twenty Chars' })
       ).SITE
     ).toBe('');
     // overlong prefix (and overlong tail, so the suffix guess fails too)

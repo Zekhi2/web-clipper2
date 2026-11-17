@@ -50,18 +50,20 @@ const getSiteFromTitle = (title: string): string => {
 };
 
 /**
- * Fallback for sites that put the site name first: `Site Name | Long article
- * title...`. Only used for exactly two segments where the tail is too long to
- * be a site name (the suffix guess failed), which keeps hyphenated words and
- * date-like titles from producing false positives.
+ * Fallback for sites that put the site name first: `Site Name | Section |
+ * Long article title...` (any number of segments). Only used when the suffix
+ * guess failed — i.e. the tail is too long to be a site name — which keeps
+ * `Article - Section - Site` titles from being hijacked. The candidate must
+ * not end in a digit, so report titles like `Report 2023 - long article...`
+ * do not yield `Report 2023`.
  */
 const getSiteFromTitlePrefix = (title: string): string => {
   const segments = splitTitleSegments(title);
-  if (segments.length !== 2) {
+  if (segments.length < 2) {
     return '';
   }
   const head = segments[0];
-  return isPlausibleSiteName(head) ? head : '';
+  return isPlausibleSiteName(head) && !/\d$/.test(head) ? head : '';
 };
 
 /**
