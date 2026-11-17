@@ -1,6 +1,15 @@
 import { ToolExtension } from '@/extensions/common';
 import localeService from '@/common/locales';
-import { countWords, extractTemplateVariables, getDate, getTime } from './templateVariables';
+import {
+  countChars,
+  countEnglishWords,
+  countHanzi,
+  countParagraphs,
+  countWords,
+  extractTemplateVariables,
+  getDate,
+  getTime,
+} from './templateVariables';
 
 export default class Link extends ToolExtension<any> {
   constructor() {
@@ -62,6 +71,10 @@ export default class Link extends ToolExtension<any> {
               DATE: getDate(),
               TIME: getTime(),
               WORDS: `${countWords(context.data)}`,
+              HANZI: `${countHanzi(context.data)}`,
+              ENGLISH_WORDS: `${countEnglishWords(context.data)}`,
+              PARAGRAPHS: `${countParagraphs(context.data)}`,
+              CHARS: `${countChars(context.data)}`,
               DOCUMENT: context.data,
             }
           );

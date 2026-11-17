@@ -96,6 +96,56 @@ export const countWords = (content: string): number => {
   return matches ? matches.length : 0;
 };
 
+const HANZI_PATTERN = /[\u4e00-\u9fff\u3400-\u4dbf]/g;
+const LATIN_TOKEN_PATTERN = /[A-Za-z0-9_']+/g;
+
+/** Counts Han characters only (Chinese text, excluding CJK punctuation). */
+export const countHanzi = (content: string): number => {
+  if (!content) {
+    return 0;
+  }
+  const matches = content.match(HANZI_PATTERN);
+  return matches ? matches.length : 0;
+};
+
+/**
+ * Counts latin "words": runs of ASCII letters, digits, underscores and
+ * apostrophes, e.g. `Hello`, `foo_bar`, `2026` and `don't` are one each.
+ */
+export const countEnglishWords = (content: string): number => {
+  if (!content) {
+    return 0;
+  }
+  const matches = content.match(LATIN_TOKEN_PATTERN);
+  return matches ? matches.length : 0;
+};
+
+/**
+ * Counts paragraphs: non-empty blocks separated by blank lines. Each fenced
+ * code block counts as one paragraph, and blank lines inside code blocks do
+ * not split it.
+ */
+export const countParagraphs = (content: string): number => {
+  if (!content) {
+    return 0;
+  }
+  const placeholder = '\ncodeblock\n';
+  const withoutCodeBlocks = content
+    .replace(/```[\s\S]*?```/g, placeholder)
+    .replace(/~~~[\s\S]*~~~/g, placeholder);
+  return withoutCodeBlocks
+    .split(/\r?\n\s*\r?\n/)
+    .filter(block => block.trim().length > 0).length;
+};
+
+/** Counts non-whitespace characters, including Markdown syntax characters. */
+export const countChars = (content: string): number => {
+  if (!content) {
+    return 0;
+  }
+  return content.replace(/\s/g, '').length;
+};
+
 /** Current date, e.g. 2026-11-16. */
 export const getDate = (): string => dayjs().format('YYYY-MM-DD');
 

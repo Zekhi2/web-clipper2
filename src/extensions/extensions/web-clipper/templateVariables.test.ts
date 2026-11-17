@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import {
+  countChars,
+  countEnglishWords,
+  countHanzi,
+  countParagraphs,
   countWords,
   extractTemplateVariables,
   getDate,
@@ -161,6 +165,72 @@ describe('countWords', () => {
   it('returns 0 for empty content', () => {
     expect(countWords('')).toBe(0);
     expect(countWords('   \n\t')).toBe(0);
+  });
+});
+
+describe('countHanzi', () => {
+  it('counts Han characters only, excluding CJK punctuation', () => {
+    expect(countHanzi('你好，世界。')).toBe(4);
+  });
+
+  it('does not count latin text, kana or hangul', () => {
+    expect(countHanzi('Hello 世界')).toBe(2);
+    expect(countHanzi('こんにちは、世界')).toBe(2);
+    expect(countHanzi('안녕 세상')).toBe(0);
+  });
+
+  it('returns 0 for empty content', () => {
+    expect(countHanzi('')).toBe(0);
+    expect(countHanzi('abc 123')).toBe(0);
+  });
+});
+
+describe('countEnglishWords', () => {
+  it('counts latin tokens including digits, underscores and apostrophes', () => {
+    expect(countEnglishWords("Hello, world! foo_bar don't")).toBe(4);
+    expect(countEnglishWords('since 2026')).toBe(2);
+  });
+
+  it('does not count Chinese characters', () => {
+    expect(countEnglishWords('你好 world')).toBe(1);
+  });
+
+  it('returns 0 for empty content', () => {
+    expect(countEnglishWords('')).toBe(0);
+    expect(countEnglishWords('你好，世界。')).toBe(0);
+  });
+});
+
+describe('countParagraphs', () => {
+  it('counts non-empty blocks separated by blank lines', () => {
+    expect(countParagraphs('first\n\nsecond\n\nthird')).toBe(3);
+    expect(countParagraphs('first\nsecond\n\nthird')).toBe(2);
+  });
+
+  it('counts each fenced code block as one paragraph', () => {
+    const content = '```\nconst a = 1;\n\nconst b = 2;\n```\n\nafter the code';
+    expect(countParagraphs(content)).toBe(2);
+  });
+
+  it('ignores whitespace-only blocks and CRLF line endings', () => {
+    expect(countParagraphs('first\r\n\r\n   \r\n\r\nsecond')).toBe(2);
+  });
+
+  it('returns 0 for empty content', () => {
+    expect(countParagraphs('')).toBe(0);
+    expect(countParagraphs('\n\n\n')).toBe(0);
+  });
+});
+
+describe('countChars', () => {
+  it('counts non-whitespace characters including punctuation and markdown syntax', () => {
+    expect(countChars('Hello 世界。\n\nBye')).toBe(11);
+    expect(countChars('# Title')).toBe(6);
+  });
+
+  it('returns 0 for empty or whitespace-only content', () => {
+    expect(countChars('')).toBe(0);
+    expect(countChars('  \n\t  ')).toBe(0);
   });
 });
 
