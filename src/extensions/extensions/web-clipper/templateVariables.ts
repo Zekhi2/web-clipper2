@@ -23,6 +23,30 @@ const getDomain = (url: string): string => {
 };
 
 /**
+ * Many sites — especially Chinese news portals — append the site name to the
+ * page title: `Article title - Site Name`. When neither meta tags nor JSON-LD
+ * declare a site name, the last short segment after a common separator is a
+ * reasonable guess. The segment must be short and not numeric, so titles like
+ * `Report 2023-02-27` do not yield `27`.
+ */
+const SITE_FROM_TITLE_PATTERN = /[|\-·—–_]\s*([^|\-·—–_]{1,12})\s*$/;
+
+const getSiteFromTitle = (title: string): string => {
+  const match = SITE_FROM_TITLE_PATTERN.exec(title || '');
+  const candidate = match?.[1]?.trim();
+  if (!candidate || /^[\d.,:/ ]+$/.test(candidate)) {
+    return '';
+  }
+  return candidate;
+};
+
+const timeContent = (document: Document): string => {
+  const element = document.querySelector('time[datetime]');
+  const datetime = element?.getAttribute('datetime');
+  return datetime ? datetime.trim() : '';
+};
+
+/**
  * Extract a top-level property from the page's JSON-LD (schema.org) data.
  * Handles arrays of items, `@graph` containers and object/array values like
  * `author: { name: '...' }` or `author: [{ name: '...' }, { name: '...' }]`.
@@ -67,16 +91,22 @@ export const extractTemplateVariables = (document: Document): TemplateVariables 
     TITLE: document.title || '',
     URL: document.URL || '',
     AUTHOR:
-      metaContent(document, 'meta[name="author" i]') || getJsonLdValue(document, 'author'),
+      metaContent(document, 'meta[name="author" i]') ||
+      metaContent(document, 'meta[property="article:author" i]') ||
+      getJsonLdValue(document, 'author'),
     DESCRIPTION:
       metaContent(document, 'meta[name="description" i]') ||
       metaContent(document, 'meta[property="og:description" i]'),
     PUBLISHED:
       metaContent(document, 'meta[property="article:published_time" i]') ||
-      getJsonLdValue(document, 'datePublished'),
+      getJsonLdValue(document, 'datePublished') ||
+      getJsonLdValue(document, 'pubDate') ||
+      timeContent(document),
     SITE:
       metaContent(document, 'meta[property="og:site_name" i]') ||
-      metaContent(document, 'meta[name="application-name" i]'),
+      metaContent(document, 'meta[name="application-name" i]') ||
+      getJsonLdValue(document, 'publisher') ||
+      getSiteFromTitle(document.title),
     DOMAIN: getDomain(document.URL),
     IMAGE:
       metaContent(document, 'meta[property="og:image" i]') ||

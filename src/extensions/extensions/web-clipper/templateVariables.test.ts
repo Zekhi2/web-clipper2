@@ -21,9 +21,15 @@ const fakeDocument = (options: {
   url?: string;
   metas?: FakeMeta[];
   jsonLd?: string[];
+  time?: string;
 }) => {
-  const { title = 'Test Title', url = 'https://example.com/blog/post', metas = [], jsonLd = [] } = options;
+  const { title = 'Test Title', url = 'https://example.com/blog/post', metas = [], jsonLd = [], time } = options;
   const findMeta = (selector: string) => {
+    if (selector === 'time[datetime]') {
+      return {
+        getAttribute: (attribute: string) => (attribute === 'datetime' ? time : null),
+      };
+    }
     const match = selector.match(/meta\[([a-z]+)="([^"]+)"/);
     if (!match) {
       return null;
@@ -123,6 +129,58 @@ describe('extractTemplateVariables', () => {
       fakeDocument({ metas: [{ name: 'application-name', content: 'Example App' }] })
     );
     expect(fallback.SITE).toBe('Example App');
+  });
+
+  it('falls back to JSON-LD publisher for the site name', () => {
+    const variables = extractTemplateVariables(
+      fakeDocument({ jsonLd: [JSON.stringify({ publisher: { name: 'Example Press' } })] })
+    );
+    expect(variables.SITE).toBe('Example Press');
+  });
+
+  it('guesses the site name from the title suffix', () => {
+    // e.g. news.eol.cn: no og:site_name, no application-name, no JSON-LD publisher
+    const variables = extractTemplateVariables(
+      fakeDocument({ title: '人类历史上的四次信息技术革命-教育在线' })
+    );
+    expect(variables.SITE).toBe('教育在线');
+
+    const piped = extractTemplateVariables(
+      fakeDocument({ title: 'Some Article | Tech Site' })
+    );
+    expect(piped.SITE).toBe('Tech Site');
+  });
+
+  it('does not guess a site name from titles without a suffix or with a numeric tail', () => {
+    expect(
+      extractTemplateVariables(fakeDocument({ title: '人类历史上的四次信息技术革命' })).SITE
+    ).toBe('');
+    expect(extractTemplateVariables(fakeDocument({ title: 'Report 2023-02-27' })).SITE).toBe('');
+    expect(
+      extractTemplateVariables(fakeDocument({ title: 'A Very Long Article Title Indeed' })).SITE
+    ).toBe('');
+  });
+
+  it('falls back to Baidu-style pubDate and <time datetime> for the published date', () => {
+    const pubDateVariables = extractTemplateVariables(
+      fakeDocument({ jsonLd: [JSON.stringify({ pubDate: '2026-03-03T09:00:00' })] })
+    );
+    expect(pubDateVariables.PUBLISHED).toBe('2026-03-03T09:00:00');
+
+    const timeVariables = extractTemplateVariables(fakeDocument({ time: ' 2026-04-04 ' }));
+    expect(timeVariables.PUBLISHED).toBe('2026-04-04');
+  });
+
+  it('extracts author from article:author when meta author is empty', () => {
+    const variables = extractTemplateVariables(
+      fakeDocument({
+        metas: [
+          { name: 'author', content: '' },
+          { property: 'article:author', content: 'Jane' },
+        ],
+      })
+    );
+    expect(variables.AUTHOR).toBe('Jane');
   });
 
   it('extracts image from og:image or twitter:image', () => {
