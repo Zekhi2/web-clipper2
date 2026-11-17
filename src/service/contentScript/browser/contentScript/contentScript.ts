@@ -8,6 +8,7 @@ import Highlighter from '@web-clipper/highlight';
 import plugins from '@web-clipper/turndown';
 import TurndownService from 'turndown';
 import { ContentScriptContext } from '@/extensions/common';
+import { overrideLazyLoadImageRule } from '@/service/contentScript/common/turndownImageRule';
 import { localStorageService } from '@/common/chrome/storage';
 import { LOCAL_USER_PREFERENCE_LOCALE_KEY } from '@/common/types';
 import { IExtensionContainer } from '@/service/common/extension';
@@ -15,6 +16,43 @@ import { getResourcePath } from '@/common/getResource';
 
 const turndownService = new TurndownService({ codeBlockStyle: 'fenced' });
 turndownService.use(plugins);
+overrideLazyLoadImageRule(turndownService);
+
+/**
+ * The `lazyLoadImage` rule bundled with @web-clipper/turndown emits every
+ * image as `![](url)` followed by a newline. When the image is wrapped in a
+ * link (`<a href><img></a>`, common for clickable thumbnails), that newline
+ * ends up inside the link text (`[![](url)\n](href)`) and renders badly in
+ * Obsidian. The bundled rule also drops the alt text. Re-adding a rule with
+ * the same name replaces it: lazy-load attribute fallbacks and relative URL
+ * resolution are kept, the alt text is restored and the trailing newline is
+ * removed.
+ */
+const fixImageUrl = (url: string): string => {
+  if (url.startsWith('//')) {
+    return `${window.location.protocol}${url}`;
+  }
+  if (url.startsWith('/')) {
+    return `${window.location.origin}${url}`;
+  }
+  return url;
+};
+
+turndownService.addRule('lazyLoadImage', {
+  filter: 'img',
+  replacement: (_content, node) => {
+    const attributes = ['data-src', 'data-original-src', 'src'];
+    for (const attribute of attributes) {
+      const url = node.getAttribute(attribute);
+      if (url) {
+        const alt = node.getAttribute('alt') || '';
+        return `![${alt}](${fixImageUrl(url)})`;
+      }
+    }
+    return '';
+  },
+});
+
 class ContentScriptService implements IContentScriptService {
   constructor(@Inject(IExtensionContainer) private extensionContainer: IExtensionContainer) {}
 
