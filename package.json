@@ -9,6 +9,7 @@
     "test": "vitest",
     "cov": "vitest --coverage",
     "dev": "webpack --config webpack/webpack.dev.js --watch",
+    "build": "node -e \"require('fs').mkdirSync('dist',{recursive:true})\" && webpack --config webpack/webpack.prod.js",
     "release": "ts-node script/release.ts",
     "format": "web-clipper format"
   },
