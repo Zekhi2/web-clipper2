@@ -6,7 +6,7 @@ import {
   countHanzi,
   countParagraphs,
   countWords,
-  extractTemplateVariables,
+  extractTemplateVariablesAsync,
   getDate,
   getTime,
 } from './templateVariables';
@@ -60,7 +60,7 @@ export default class Link extends ToolExtension<any> {
 			},
       {
         run: async context => {
-          return extractTemplateVariables(context.document);
+          return extractTemplateVariablesAsync(context.document);
         },
         afterRun: async context => {
           const config: { template: string } = context.config!;

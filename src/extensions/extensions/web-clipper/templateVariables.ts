@@ -29,15 +29,70 @@ const getDomain = (url: string): string => {
  * reasonable guess. The segment must be short and not numeric, so titles like
  * `Report 2023-02-27` do not yield `27`.
  */
-const SITE_FROM_TITLE_PATTERN = /[|\-·—–_]\s*([^|\-·—–_]{1,12})\s*$/;
+const SITE_TITLE_SEPARATOR = /\s*[|\-·—–_]\s*/;
 
+const MAX_SITE_NAME_LENGTH = 20;
+
+const isPlausibleSiteName = (candidate: string): boolean =>
+  candidate.length > 0 && candidate.length <= MAX_SITE_NAME_LENGTH && !/^[\d.,:/ ]+$/.test(candidate);
+
+const splitTitleSegments = (title: string): string[] =>
+  (title || '').split(SITE_TITLE_SEPARATOR).filter(segment => segment.length > 0);
+
+/** Site name guessed from the title tail: `Article - Site Name`. */
 const getSiteFromTitle = (title: string): string => {
-  const match = SITE_FROM_TITLE_PATTERN.exec(title || '');
-  const candidate = match?.[1]?.trim();
-  if (!candidate || /^[\d.,:/ ]+$/.test(candidate)) {
+  const segments = splitTitleSegments(title);
+  if (segments.length < 2) {
     return '';
   }
-  return candidate;
+  const tail = segments[segments.length - 1];
+  return isPlausibleSiteName(tail) ? tail : '';
+};
+
+/**
+ * Fallback for sites that put the site name first: `Site Name | Long article
+ * title...`. Only used for exactly two segments where the tail is too long to
+ * be a site name (the suffix guess failed), which keeps hyphenated words and
+ * date-like titles from producing false positives.
+ */
+const getSiteFromTitlePrefix = (title: string): string => {
+  const segments = splitTitleSegments(title);
+  if (segments.length !== 2) {
+    return '';
+  }
+  const head = segments[0];
+  return isPlausibleSiteName(head) ? head : '';
+};
+
+/**
+ * Web App Manifest (`<link rel="manifest">`) names are an increasingly common
+ * site declaration. The manifest may be cross-origin and is fetched
+ * asynchronously; every failure is swallowed — the manifest is only one of
+ * many fallbacks.
+ */
+const getSiteFromManifest = async (document: Document): Promise<string> => {
+  const link = document.querySelector('link[rel~="manifest"]');
+  const href = link?.getAttribute('href');
+  if (!href) {
+    return '';
+  }
+  try {
+    const url = new URL(href, document.baseURI || document.URL);
+    const response = await fetch(url.href);
+    if (!response.ok) {
+      return '';
+    }
+    const manifest = await response.json();
+    if (typeof manifest?.name === 'string' && manifest.name.trim()) {
+      return manifest.name.trim();
+    }
+    if (typeof manifest?.short_name === 'string' && manifest.short_name.trim()) {
+      return manifest.short_name.trim();
+    }
+  } catch {
+    // Unreachable manifest, CORS rejection or invalid JSON: just fall through.
+  }
+  return '';
 };
 
 const timeContent = (document: Document): string => {
@@ -175,13 +230,29 @@ export const extractTemplateVariables = (document: Document): TemplateVariables 
     SITE:
       metaContent(document, 'meta[property="og:site_name" i]') ||
       metaContent(document, 'meta[name="application-name" i]') ||
+      metaContent(document, 'meta[name="apple-mobile-web-app-title" i]') ||
       getJsonLdValue(document, 'publisher') ||
-      getSiteFromTitle(document.title),
+      getSiteFromTitle(document.title) ||
+      getSiteFromTitlePrefix(document.title),
     DOMAIN: getDomain(document.URL),
     IMAGE:
       metaContent(document, 'meta[property="og:image" i]') ||
       metaContent(document, 'meta[name="twitter:image" i]'),
   };
+};
+
+/**
+ * Same as `extractTemplateVariables`, but additionally fetches the Web App
+ * Manifest for the site name when no cheaper signal produced one.
+ */
+export const extractTemplateVariablesAsync = async (
+  document: Document
+): Promise<TemplateVariables> => {
+  const variables = extractTemplateVariables(document);
+  if (!variables.SITE) {
+    variables.SITE = await getSiteFromManifest(document);
+  }
+  return variables;
 };
 
 /**

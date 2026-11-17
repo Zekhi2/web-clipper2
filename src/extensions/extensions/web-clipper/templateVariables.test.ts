@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   countChars,
   countEnglishWords,
@@ -6,6 +6,7 @@ import {
   countParagraphs,
   countWords,
   extractTemplateVariables,
+  extractTemplateVariablesAsync,
   getDate,
   getPublishedFromUrl,
   getTime,
@@ -23,12 +24,25 @@ const fakeDocument = (options: {
   metas?: FakeMeta[];
   jsonLd?: string[];
   time?: string;
+  link?: { href: string };
 }) => {
-  const { title = 'Test Title', url = 'https://example.com/blog/post', metas = [], jsonLd = [], time } = options;
+  const {
+    title = 'Test Title',
+    url = 'https://example.com/blog/post',
+    metas = [],
+    jsonLd = [],
+    time,
+    link,
+  } = options;
   const findMeta = (selector: string) => {
     if (selector === 'time[datetime]') {
       return {
         getAttribute: (attribute: string) => (attribute === 'datetime' ? time : null),
+      };
+    }
+    if (selector === 'link[rel~="manifest"]') {
+      return {
+        getAttribute: (attribute: string) => (attribute === 'href' ? link?.href ?? null : null),
       };
     }
     const match = selector.match(/meta\[([a-z]+)="([^"]+)"/);
@@ -48,6 +62,7 @@ const fakeDocument = (options: {
   return {
     title,
     URL: url,
+    baseURI: url,
     querySelector: findMeta,
     querySelectorAll: () => scripts,
   } as any;
@@ -130,6 +145,65 @@ describe('extractTemplateVariables', () => {
       fakeDocument({ metas: [{ name: 'application-name', content: 'Example App' }] })
     );
     expect(fallback.SITE).toBe('Example App');
+  });
+
+  it('falls back to apple-mobile-web-app-title', () => {
+    const variables = extractTemplateVariables(
+      fakeDocument({ metas: [{ name: 'apple-mobile-web-app-title', content: 'PWA Name' }] })
+    );
+    expect(variables.SITE).toBe('PWA Name');
+  });
+
+  it('accepts site name tails up to 20 characters', () => {
+    const variables = extractTemplateVariables(
+      fakeDocument({ title: 'How to Build X - The New York Times' })
+    );
+    expect(variables.SITE).toBe('The New York Times');
+  });
+
+  it('rejects title tails longer than 20 characters and falls back to the prefix', () => {
+    const variables = extractTemplateVariables(
+      fakeDocument({ title: 'How to Build X - A Really Long Publication Name Here!' })
+    );
+    // the overlong tail is rejected, but the two-segment prefix guess then
+    // yields `How to Build X`
+    expect(variables.SITE).toBe('How to Build X');
+  });
+
+  it('guesses the site name from a two-segment title prefix', () => {
+    const variables = extractTemplateVariables(
+      fakeDocument({ title: '少数派 | 一篇非常非常非常长的文章标题已经超过了二十个字符的限制' })
+    );
+    expect(variables.SITE).toBe('少数派');
+
+    const english = extractTemplateVariables(
+      fakeDocument({ title: 'Tech Site | A Very Long Article Title That Nobody Would Call A Site Name' })
+    );
+    expect(english.SITE).toBe('Tech Site');
+  });
+
+  it('rejects implausible title prefixes', () => {
+    // three segments: not a `Site | Title` pattern
+    expect(
+      extractTemplateVariables(
+        fakeDocument({ title: 'Site | Category | An Extremely Long Article Title Beyond Twenty Characters' })
+      ).SITE
+    ).toBe('');
+    // numeric prefix
+    expect(
+      extractTemplateVariables(
+        fakeDocument({ title: '2026 | An Extremely Long Article Title Beyond Twenty Characters' })
+      ).SITE
+    ).toBe('');
+    // overlong prefix (and overlong tail, so the suffix guess fails too)
+    expect(
+      extractTemplateVariables(
+        fakeDocument({
+          title:
+            'An Extremely Long Opening Segment Beyond Twenty Characters | And A Very Long Tail That Also Exceeds Twenty Chars',
+        })
+      ).SITE
+    ).toBe('');
   });
 
   it('falls back to JSON-LD publisher for the site name', () => {
@@ -251,6 +325,85 @@ describe('extractTemplateVariables', () => {
     expect(variables.PUBLISHED).toBe('');
     expect(variables.SITE).toBe('');
     expect(variables.IMAGE).toBe('');
+  });
+});
+
+describe('extractTemplateVariablesAsync (manifest fallback)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('fills the site name from the web app manifest', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ name: 'Example Site', short_name: 'Example' }),
+        })
+      )
+    );
+    const variables = await extractTemplateVariablesAsync(
+      fakeDocument({ link: { href: '/manifest.json' } })
+    );
+    expect(variables.SITE).toBe('Example Site');
+  });
+
+  it('uses short_name when the manifest has no name', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve({ short_name: 'Shorty' }) }))
+    );
+    const variables = await extractTemplateVariablesAsync(
+      fakeDocument({ link: { href: 'https://cdn.example.com/appmanifest.json' } })
+    );
+    expect(variables.SITE).toBe('Shorty');
+  });
+
+  it('does not fetch a manifest when a site name was already found', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const variables = await extractTemplateVariablesAsync(
+      fakeDocument({
+        metas: [{ property: 'og:site_name', content: 'Declared' }],
+        link: { href: '/manifest.json' },
+      })
+    );
+    expect(variables.SITE).toBe('Declared');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('silently ignores manifest failures', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.reject(new Error('CORS')))
+    );
+    const variables = await extractTemplateVariablesAsync(
+      fakeDocument({ link: { href: '/manifest.json' } })
+    );
+    expect(variables.SITE).toBe('');
+  });
+
+  it('silently ignores a manifest without usable names', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve({}) }))
+    );
+    const variables = await extractTemplateVariablesAsync(
+      fakeDocument({ link: { href: '/manifest.json' } })
+    );
+    expect(variables.SITE).toBe('');
+  });
+
+  it('silently ignores an HTTP error response', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve({ ok: false, json: () => Promise.resolve({ name: 'Nope' }) }))
+    );
+    const variables = await extractTemplateVariablesAsync(
+      fakeDocument({ link: { href: '/manifest.json' } })
+    );
+    expect(variables.SITE).toBe('');
   });
 });
 
