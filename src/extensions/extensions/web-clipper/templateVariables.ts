@@ -46,6 +46,70 @@ const timeContent = (document: Document): string => {
   return datetime ? datetime.trim() : '';
 };
 
+const isValidDateParts = (year: number, month: number, day: number): boolean => {
+  if (year < 1990 || year > new Date().getFullYear() + 1) {
+    return false;
+  }
+  const asUtcDate = new Date(Date.UTC(year, month - 1, day));
+  return asUtcDate.getUTCMonth() === month - 1 && asUtcDate.getUTCDate() === day;
+};
+
+/** URL path patterns that embed the publish date, common across news CMSes. */
+const URL_DATE_PATTERNS = [
+  // /2023/02/27/, 2023-02-27 (also single-digit month/day)
+  /(?:^|[\W_])(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})(?:$|[\W_])/,
+  // 20230227, optionally preceded by a CMS marker such as `t20230227_`
+  /(?:^|[\W_])t?(\d{4})(\d{2})(\d{2})(?:$|[\W_])/,
+];
+
+/**
+ * Infers the publish date from the article URL. CMSes bake the date into the
+ * URL slug when the article is first published and never rewrite it when the
+ * page is later regenerated, so it is often more faithful than metadata the
+ * CMS may restamp on update. Returns `YYYY-MM-DD` or ''.
+ */
+export const getPublishedFromUrl = (url: string): string => {
+  try {
+    const path = new URL(url).pathname;
+    for (const pattern of URL_DATE_PATTERNS) {
+      const match = pattern.exec(path);
+      if (match) {
+        const year = parseInt(match[1], 10);
+        const month = parseInt(match[2], 10);
+        const day = parseInt(match[3], 10);
+        if (isValidDateParts(year, month, day)) {
+          return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+        }
+      }
+    }
+  } catch {
+    // Not a parseable URL.
+  }
+  return '';
+};
+
+/**
+ * Decides between a declared publish date and the URL-inferred date. Declared
+ * metadata wins unless the two conflict on the year — e.g. a CMS restamps
+ * `pubDate` when it regenerates a page — in which case the URL date (frozen at
+ * publish time) is more trustworthy. Keeps the declared value when the years
+ * agree so that its time-of-day is preserved.
+ */
+const resolvePublished = (declared: string, urlDate: string): string => {
+  if (!declared) {
+    return urlDate;
+  }
+  if (!urlDate) {
+    return declared;
+  }
+  const declaredYear = parseInt(declared.slice(0, 4), 10);
+  const urlYear = parseInt(urlDate.slice(0, 4), 10);
+  if (declaredYear && urlYear && declaredYear !== urlYear) {
+    return urlDate;
+  }
+  return declared;
+};
+
 /**
  * Extract a top-level property from the page's JSON-LD (schema.org) data.
  * Handles arrays of items, `@graph` containers and object/array values like
@@ -97,11 +161,17 @@ export const extractTemplateVariables = (document: Document): TemplateVariables 
     DESCRIPTION:
       metaContent(document, 'meta[name="description" i]') ||
       metaContent(document, 'meta[property="og:description" i]'),
-    PUBLISHED:
+    PUBLISHED: resolvePublished(
       metaContent(document, 'meta[property="article:published_time" i]') ||
-      getJsonLdValue(document, 'datePublished') ||
-      getJsonLdValue(document, 'pubDate') ||
-      timeContent(document),
+        getJsonLdValue(document, 'datePublished') ||
+        getJsonLdValue(document, 'pubDate') ||
+        timeContent(document),
+      getPublishedFromUrl(document.URL)
+    ),
+    UPDATED:
+      metaContent(document, 'meta[property="article:modified_time" i]') ||
+      getJsonLdValue(document, 'dateModified') ||
+      getJsonLdValue(document, 'upDate'),
     SITE:
       metaContent(document, 'meta[property="og:site_name" i]') ||
       metaContent(document, 'meta[name="application-name" i]') ||

@@ -7,6 +7,7 @@ import {
   countWords,
   extractTemplateVariables,
   getDate,
+  getPublishedFromUrl,
   getTime,
 } from './templateVariables';
 
@@ -171,6 +172,54 @@ describe('extractTemplateVariables', () => {
     expect(timeVariables.PUBLISHED).toBe('2026-04-04');
   });
 
+  it('infers the publish date from the URL when nothing is declared', () => {
+    const variables = extractTemplateVariables(
+      fakeDocument({ url: 'https://news.eol.cn/lzmzl/202302/t20230227_2305759.shtml' })
+    );
+    expect(variables.PUBLISHED).toBe('2023-02-27');
+  });
+
+  it('prefers the URL date when the declared date conflicts on the year', () => {
+    // eol.cn restamps pubDate when it regenerates a page; the URL date is frozen
+    // at publish time and matches the visible article date.
+    const variables = extractTemplateVariables(
+      fakeDocument({
+        url: 'https://news.eol.cn/lzmzl/202302/t20230227_2305759.shtml',
+        jsonLd: [JSON.stringify({ pubDate: '2026-08-03T10:50:54' })],
+      })
+    );
+    expect(variables.PUBLISHED).toBe('2023-02-27');
+  });
+
+  it('keeps the declared value when its year matches the URL date', () => {
+    const variables = extractTemplateVariables(
+      fakeDocument({
+        url: 'https://news.eol.cn/lzmzl/202302/t20230227_2305759.shtml',
+        jsonLd: [JSON.stringify({ datePublished: '2023-02-27T08:00:00' })],
+      })
+    );
+    expect(variables.PUBLISHED).toBe('2023-02-27T08:00:00');
+  });
+
+  it('extracts the updated date from article:modified_time, dateModified or upDate', () => {
+    const metaVariables = extractTemplateVariables(
+      fakeDocument({ metas: [{ property: 'article:modified_time', content: '2026-05-05' }] })
+    );
+    expect(metaVariables.UPDATED).toBe('2026-05-05');
+
+    const dateModifiedVariables = extractTemplateVariables(
+      fakeDocument({ jsonLd: [JSON.stringify({ dateModified: '2026-06-06' })] })
+    );
+    expect(dateModifiedVariables.UPDATED).toBe('2026-06-06');
+
+    const upDateVariables = extractTemplateVariables(
+      fakeDocument({ jsonLd: [JSON.stringify({ upDate: '2026-08-03T10:50:54' })] })
+    );
+    expect(upDateVariables.UPDATED).toBe('2026-08-03T10:50:54');
+
+    expect(extractTemplateVariables(fakeDocument({})).UPDATED).toBe('');
+  });
+
   it('extracts author from article:author when meta author is empty', () => {
     const variables = extractTemplateVariables(
       fakeDocument({
@@ -202,6 +251,36 @@ describe('extractTemplateVariables', () => {
     expect(variables.PUBLISHED).toBe('');
     expect(variables.SITE).toBe('');
     expect(variables.IMAGE).toBe('');
+  });
+});
+
+describe('getPublishedFromUrl', () => {
+  it('extracts dates from common CMS URL patterns', () => {
+    expect(getPublishedFromUrl('https://news.eol.cn/lzmzl/202302/t20230227_2305759.shtml')).toBe(
+      '2023-02-27'
+    );
+    expect(getPublishedFromUrl('https://example.com/news/2023/02/27/post.html')).toBe('2023-02-27');
+    expect(getPublishedFromUrl('https://example.com/2023-02-27-article')).toBe('2023-02-27');
+    expect(getPublishedFromUrl('https://example.com/c/2024-11-8/123.shtml')).toBe('2024-11-08');
+  });
+
+  it('rejects digit runs that are not plausible dates', () => {
+    // a random 8-digit id: month 56 is invalid
+    expect(getPublishedFromUrl('https://example.com/p/12345678.html')).toBe('');
+    // year out of range
+    expect(getPublishedFromUrl('https://example.com/p/87654321.html')).toBe('');
+    expect(getPublishedFromUrl('https://example.com/p/18991231.html')).toBe('');
+    // impossible calendar date (Feb 31)
+    expect(getPublishedFromUrl('https://example.com/2023/02/31/post.html')).toBe('');
+    // year/month only, no day
+    expect(getPublishedFromUrl('https://example.com/2015/03/article-title.html')).toBe('');
+    // not a date at all
+    expect(getPublishedFromUrl('https://example.com/blog/post')).toBe('');
+    expect(getPublishedFromUrl('not-a-url')).toBe('');
+  });
+
+  it('does not match inside longer word tokens', () => {
+    expect(getPublishedFromUrl('https://example.com/x20230227y.html')).toBe('');
   });
 });
 
