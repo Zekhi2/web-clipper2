@@ -5,6 +5,15 @@ import NotionDocumentService from '@/common/backend/services/notion/service';
 import { IBasicRequestService } from '@/service/common/request';
 import { buildNotionProbeUrl } from '@/common/backend/services/notion/imageHandling';
 
+vi.mock('antd', () => ({
+  message: {
+    loading: vi.fn(() => ({})),
+    destroy: vi.fn(),
+    warning: vi.fn(),
+    success: vi.fn(),
+  },
+}));
+
 vi.mock('@/common/locales', () => ({
   default: {
     format: (d: { id?: string; defaultMessage?: string }) => d.defaultMessage ?? '',
@@ -489,7 +498,7 @@ describe('NotionDocumentService (official REST API + PAT)', () => {
     expect(download).toHaveBeenCalledTimes(2);
     // The pre-signed upload URL is hit with a bare fetch (no auth headers).
     expect(fetchMock).toHaveBeenCalledWith('https://upload.notion.com/fu1', expect.anything());
-    const patch = calls.find((call) => call.method === 'PATCH');
+    const patch = calls.find((call) => call.method === 'PATCH')!;
     expect(patch.url).toBe('/blocks/b1');
     expect(patch.data).toEqual({
       image: { type: 'file_upload', file_upload: { id: 'fu1' } },
@@ -542,7 +551,7 @@ describe('NotionDocumentService (official REST API + PAT)', () => {
     });
     const body = calls.find((call) => call.url === '/pages')!.data;
     expect(body.markdown).toBe('![img](https://cdn.example.com/a.jpg)');
-    const patch = calls.find((call) => call.method === 'PATCH');
+    const patch = calls.find((call) => call.method === 'PATCH')!;
     expect(patch.data).toEqual({
       image: { type: 'file_upload', file_upload: { id: 'fu2' } },
     });

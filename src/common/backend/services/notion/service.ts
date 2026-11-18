@@ -1,6 +1,7 @@
 import localeService from '@/common/locales';
 import { CATEGORY_BOOKMARK, isBookmarkStub } from '@/common/clipCategory';
 import axios, { AxiosInstance } from 'axios';
+import { message } from 'antd';
 import Container from 'typedi';
 import { IBasicRequestService } from '@/service/common/request';
 import { CreateDocumentRequest, DocumentService } from '../../index';
@@ -370,6 +371,33 @@ export default class NotionDocumentService implements DocumentService {
     }
   };
 
+  /** A single, replacesable progress notification for the image pipeline. */
+  private progressKey = `notion-image-progress-${Date.now()}`;
+
+  private showImageProgress = (id: string, defaultMessage: string, values?: Record<string, any>) => {
+    message.destroy(this.progressKey);
+    message.loading({
+      content: localeService.format({ id, defaultMessage }, values),
+      key: this.progressKey,
+      duration: 0,
+    });
+  };
+
+  private finishImageProgress = (failed: number) => {
+    message.destroy(this.progressKey);
+    if (failed > 0) {
+      message.warning(
+        localeService.format(
+          {
+            id: 'backend.services.notion.image.progress.failed',
+            defaultMessage: '{count} image(s) could not be rehosted; original links were kept.',
+          },
+          { count: failed }
+        )
+      );
+    }
+  };
+
   /** Download an image with the user's (browser) identity, for rehosting.
    * The bytes the user's browser can fetch are what gets uploaded. Includes
    * a timeout so a hung CDN cannot stall the whole clip. */
@@ -441,10 +469,16 @@ export default class NotionDocumentService implements DocumentService {
     if (this.imageHandling === 'always') {
       blocked = urls;
     } else {
+      this.showImageProgress(
+        'backend.services.notion.image.progress.probe',
+        'Checking {count} image(s) against Notion…',
+        { count: urls.length }
+      );
       const accessibility = await probeImageAccessibility(urls, (url) => this.probeDownload(url));
       blocked = urls.filter((url) => !accessibility.get(url));
     }
     if (blocked.length === 0) {
+      this.finishImageProgress(0);
       return { markdown, notionUploads: [] };
     }
 
@@ -458,24 +492,41 @@ export default class NotionDocumentService implements DocumentService {
 
     const mapping = new Map<string, string>();
     const notionUploads: string[] = [];
+    let failed = 0;
+    let done = 0;
+    const targetLabel =
+      this.rehostTarget === 'notion' || !externalService ? 'Notion' : 'image host';
     for (const url of blocked) {
+      this.showImageProgress(
+        'backend.services.notion.image.progress.rehost',
+        'Rehosting images to {target}: {done}/{total}…',
+        { target: targetLabel, done, total: blocked.length }
+      );
       if (preferExternal && externalService) {
         try {
           const hosted = await externalService.uploadImageUrl(url);
           if (hosted) {
             mapping.set(url, hosted);
+            done++;
             continue;
           }
-        } catch {
-          // Fall through to the Notion upload when the image host rejects it.
+        } catch (error) {
+          console.warn('[web-clipper] image host upload failed', url, error);
         }
         if (externalOnly) {
+          failed++;
           continue; // Keep the original URL rather than uploading to Notion.
         }
       }
       if (allowNotionFallback) {
         notionUploads.push(url);
+        done++;
+      } else {
+        failed++;
       }
+    }
+    if (notionUploads.length === 0) {
+      this.finishImageProgress(failed);
     }
     return { markdown: replaceImageUrls(markdown, mapping), notionUploads };
   };
@@ -517,45 +568,95 @@ export default class NotionDocumentService implements DocumentService {
     const blocks: any[] = [];
     let cursor: string | null = null;
     do {
-      const { data } = await this.request.get(
+      const pageResponse: {
+        data: { results: any[]; has_more: boolean; next_cursor: string | null };
+      } = await this.request.get(
         `/blocks/${pageId}/children${cursor ? `?start_cursor=${cursor}` : ''}`
       );
+      const data = pageResponse.data;
       blocks.push(...((data && data.results) || []));
       cursor = data && data.has_more ? data.next_cursor : null;
     } while (cursor);
     return blocks;
   };
 
+  /** Recursively collect image blocks (Notion can nest them inside callouts,
+   * toggles, columns, list items, …). */
+  private collectImageBlocks = (blocks: any[], found: any[] = []): any[] => {
+    blocks.forEach((block) => {
+      if (block?.type === 'image') {
+        found.push(block);
+      }
+      const children = block?.children;
+      if (Array.isArray(children)) {
+        this.collectImageBlocks(children, found);
+      }
+    });
+    return found;
+  };
+
+  /** Compare URLs after normalizing encoding and trailing separators, so the
+   * URL Notion stores still matches the one we sent in the markdown. */
+  private normalizedImageUrl = (url: string): string => {
+    try {
+      return decodeURIComponent(url).trim().replace(/\/+$/, '');
+    } catch {
+      return (url || '').trim();
+    }
+  };
+
   /** Replace image blocks whose external URL is in `urls` with Notion-hosted
-   * file uploads. Per-block failures are swallowed: the page keeps the
-   * original external URL, which degrades gracefully. */
+   * file uploads. Per-block failures are reported and the original external
+   * URL is kept, so the page still exists if anything goes wrong. */
   private attachNotionUploads = async (pageId: string, urls: string[]): Promise<void> => {
     if (urls.length === 0) {
       return;
     }
-    const pending = new Set(urls);
+    const pending = new Set(urls.map((url) => this.normalizedImageUrl(url)));
+    let failed = 0;
+    let done = 0;
     try {
       const blocks = await this.getAllBlockChildren(pageId);
-      for (const block of blocks) {
-        const externalUrl = block?.image?.external?.url;
-        if (block?.type !== 'image' || !externalUrl || !pending.has(externalUrl)) {
-          continue;
-        }
+      const images = this.collectImageBlocks(blocks).filter((block) => {
+        const external = block?.image?.external?.url;
+        return external && pending.has(this.normalizedImageUrl(external));
+      });
+      for (const block of images) {
+        this.showImageProgress(
+          'backend.services.notion.image.progress.notion',
+          'Uploading images to Notion: {done}/{total}…',
+          { done, total: images.length }
+        );
+        const externalUrl = block.image.external.url;
         const uploadId = await this.uploadImageToNotion(externalUrl);
         if (!uploadId) {
+          failed++;
+          console.warn('[web-clipper] Notion file upload failed for', externalUrl);
           continue;
         }
         try {
           await this.request.patch(`/blocks/${block.id}`, {
             image: { type: 'file_upload', file_upload: { id: uploadId } },
           });
-        } catch {
-          // Keep the external image; it is better than losing the block.
+          done++;
+        } catch (error) {
+          failed++;
+          console.warn('[web-clipper] Notion image block patch failed for', externalUrl, error);
         }
       }
-    } catch {
-      // Listing blocks failed: leave the page as created.
+      failed += urls.length - images.length;
+      if (images.length < urls.length) {
+        console.warn(
+          '[web-clipper] Notion image blocks not found for',
+          urls.length - images.length,
+          'image(s)'
+        );
+      }
+    } catch (error) {
+      failed += urls.length - done;
+      console.warn('[web-clipper] failed to list Notion image blocks', error);
     }
+    this.finishImageProgress(failed);
   };
 
   createDocument = async ({
