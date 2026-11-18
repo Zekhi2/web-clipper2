@@ -281,6 +281,81 @@ describe('NotionDocumentService (official REST API + PAT)', () => {
     expect(body.markdown).toContain('hello');
   });
 
+  test('frontmatter category maps to the Category select property', async () => {
+    const { service, calls } = setup((url) => {
+      if (url === '/pages/ds4' || url === '/databases/ds4') {
+        return Promise.reject({ response: { status: 404 } });
+      }
+      if (url === '/data_sources/ds4') {
+        return {
+          data: {
+            properties: {
+              Title: { type: 'title' },
+              Category: {
+                type: 'select',
+                select: {
+                  options: [
+                    { name: '📄 Article' },
+                    { name: '🎬 Video' },
+                    { name: '🔖 Bookmark' },
+                  ],
+                },
+              },
+            },
+          },
+        };
+      }
+      if (url === '/pages') {
+        return { data: { id: 'new-6', url: 'https://www.notion.so/new6' } };
+      }
+      return { data: null };
+    });
+    await service.createDocument({
+      repositoryId: 'ds4',
+      title: 'A video clip',
+      content: ['---', 'source: youtu.be/abc', 'category: 🎬 Video', '---', 'hello'].join('\n'),
+    });
+    const body = calls.find((call) => call.url === '/pages')!.data;
+    expect(body.properties.Category).toEqual({ select: { name: '🎬 Video' } });
+    expect(body.properties['userDefined:URL']).toBeUndefined(); // youtu.be is not a bare domain
+    expect(body.markdown).not.toContain('category:');
+  });
+
+  test('bookmark stubs are classified when the template has no category', async () => {
+    const { service, calls } = setup((url) => {
+      if (url === '/pages/ds5' || url === '/databases/ds5') {
+        return Promise.reject({ response: { status: 404 } });
+      }
+      if (url === '/data_sources/ds5') {
+        return {
+          data: {
+            properties: {
+              Title: { type: 'title' },
+              Category: { type: 'select' },
+            },
+          },
+        };
+      }
+      if (url === '/pages') {
+        return { data: { id: 'new-7', url: 'https://www.notion.so/new7' } };
+      }
+      return { data: null };
+    });
+    await service.createDocument({
+      repositoryId: 'ds5',
+      title: 'A saved link',
+      content: [
+        '---',
+        'clipped: 2026-11-18',
+        'source: example.com',
+        '---',
+        '## Link \n [https://example.com](https://example.com) \n ## Comment:',
+      ].join('\n'),
+    });
+    const body = calls.find((call) => call.url === '/pages')!.data;
+    expect(body.properties.Category).toEqual({ select: { name: '🔖 Bookmark' } });
+  });
+
   test('a 401 is reported as an invalid token', async () => {
     const { service } = setup((url) => {
       if (url === '/users/me') {

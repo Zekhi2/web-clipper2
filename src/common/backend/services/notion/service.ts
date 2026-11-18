@@ -1,4 +1,5 @@
 import localeService from '@/common/locales';
+import { CATEGORY_BOOKMARK, isBookmarkStub } from '@/common/clipCategory';
 import axios, { AxiosInstance } from 'axios';
 import { CreateDocumentRequest, DocumentService } from '../../index';
 import { CompleteStatus, UnauthorizedError } from './../interface';
@@ -370,6 +371,12 @@ export default class NotionDocumentService implements DocumentService {
     // in an H1. Notion understands neither as metadata, so split it out.
     const { meta, body: article } = parseFrontmatter(content);
     const cleanArticle = Object.keys(meta).length > 0 ? stripDuplicateHeading(article, safeTitle) : article;
+
+    // Bookmark clips wrap a tiny link stub. When the template has no explicit
+    // category, classify them so the Category property stays accurate.
+    if (!meta.category?.trim() && isBookmarkStub(cleanArticle)) {
+      meta.category = CATEGORY_BOOKMARK;
+    }
 
     const { schema, titleName } = await this.getParentProperties(repositoryId, objectType);
     const properties: Record<string, any> = {

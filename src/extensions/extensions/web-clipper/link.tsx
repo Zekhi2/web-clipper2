@@ -1,5 +1,6 @@
 import { ToolExtension } from '@/extensions/common';
 import localeService from '@/common/locales';
+import { CATEGORY_BOOKMARK, isBookmarkStub } from '@/common/clipCategory';
 import {
   countChars,
   countEnglishWords,
@@ -76,6 +77,11 @@ export default class Link extends ToolExtension<any> {
               PARAGRAPHS: `${countParagraphs(context.data)}`,
               CHARS: `${countChars(context.data)}`,
               DOCUMENT: context.data,
+              // Bookmark clips wrap a tiny link stub instead of an article,
+              // which the DOM-based detection cannot see at run() time.
+              CATEGORY: isBookmarkStub(context.data)
+                ? CATEGORY_BOOKMARK
+                : context.result.CATEGORY,
             }
           );
         },
