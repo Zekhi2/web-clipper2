@@ -1,6 +1,7 @@
 import { describe, test, expect } from 'vitest';
 import {
-  SERVER_FETCH_USER_AGENT,
+  NOTION_IMAGE_PROBE_HOST,
+  buildNotionProbeUrl,
   extensionForContentType,
   extractImageUrls,
   isImageBlobAccessible,
@@ -42,8 +43,11 @@ describe('imageHandling', () => {
     expect(isImageBlobAccessible(null)).toBe(false);
   });
 
-  test('the simulated server identity is deliberately non-browser', () => {
-    expect(SERVER_FETCH_USER_AGENT).not.toMatch(/^Mozilla/);
+  test('buildNotionProbeUrl asks Notion to fetch the source server-side', () => {
+    expect(buildNotionProbeUrl('https://pic3.zhimg.com/a.jpg')).toBe(
+      'https://img.notionusercontent.com/ext/https%3A%2F%2Fpic3.zhimg.com%2Fa.jpg/size/?mtd=so'
+    );
+    expect(buildNotionProbeUrl('https://cdn.example.com/a.jpg')).toContain(NOTION_IMAGE_PROBE_HOST);
   });
 
   test('probeImageAccessibility classifies downloads and errors', async () => {

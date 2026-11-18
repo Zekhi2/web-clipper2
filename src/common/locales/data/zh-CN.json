@@ -100,7 +100,7 @@
   "backend.services.notion.form.share.step3": "3. 确认后回到这里点击「校验」，否则默认知识库列表会为空。",
   "backend.services.notion.form.imageHandling.label": "图片处理",
   "backend.services.notion.form.imageHandling.help": "Notion 通过自家服务器加载外链图片，部分网站（如知乎图床）会拦截该请求导致图片无法显示。",
-  "backend.services.notion.form.imageHandling.auto": "自动：能显示的保留原链，被拦截的转存",
+  "backend.services.notion.form.imageHandling.auto": "自动：只转存 Notion 实际加载不了的图片",
   "backend.services.notion.form.imageHandling.always": "全部转存",
   "backend.services.notion.form.imageHandling.never": "从不转存（保留原链）",
   "backend.services.notion.form.rehostTarget.label": "转存目标",
