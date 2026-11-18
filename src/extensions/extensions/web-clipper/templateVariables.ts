@@ -1,4 +1,5 @@
 import dayjs from 'dayjs';
+import { CATEGORY_ARTICLE, CATEGORY_VIDEO } from '@/common/clipCategory';
 
 /**
  * Page-derived variables for the template feature. Keys are the placeholder
@@ -6,6 +7,8 @@ import dayjs from 'dayjs';
  */
 export interface TemplateVariables {
   [key: string]: string;
+  /** Detected clip type: 🎬 Video, 📄 Article, or 🔖 Bookmark. */
+  CATEGORY: string;
 }
 
 const metaContent = (document: Document, selector: string): string => {
@@ -207,6 +210,84 @@ const getJsonLdValue = (document: Document, key: string): string => {
   return '';
 };
 
+const VIDEO_HOSTS = [
+  'youtube.com',
+  'youtu.be',
+  'bilibili.com',
+  'v.qq.com',
+  'vimeo.com',
+  'youku.com',
+  'ixigua.com',
+  'douyin.com',
+  'ted.com',
+  'twitch.tv',
+  'dailymotion.com',
+];
+
+const isVideoHostUrl = (url: string): boolean => {
+  try {
+    const hostname = new URL(url).hostname.toLowerCase();
+    return VIDEO_HOSTS.some(host => hostname === host || hostname.endsWith(`.${host}`));
+  } catch {
+    // Not a parseable URL.
+    return false;
+  }
+};
+
+/** Top-level `@type` values from the page's JSON-LD (schema.org) data,
+ * space-joined so regexes can test several of them at once. */
+const getJsonLdType = (document: Document): string => {
+  const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+  const types: string[] = [];
+  for (let i = 0; i < scripts.length; i++) {
+    try {
+      const parsed = JSON.parse(scripts[i].textContent || '');
+      const items: any[] = Array.isArray(parsed)
+        ? parsed
+        : [parsed, ...((parsed['@graph'] as any[]) || [])];
+      for (const item of items) {
+        const value = item?.['@type'];
+        if (typeof value === 'string' && value.trim()) {
+          types.push(value.trim());
+        } else if (Array.isArray(value)) {
+          types.push(...value.filter((entry: any) => typeof entry === 'string'));
+        }
+      }
+    } catch {
+      // Ignore invalid JSON-LD scripts.
+    }
+  }
+  return types.join(' ');
+};
+
+const ARTICLE_JSON_LD_TYPES = /\b(article|blogposting|newsarticle|webpage|webcontent)\b/i;
+const VIDEO_JSON_LD_TYPES = /\b(videoobject|movie)\b/i;
+
+/**
+ * Best-effort clip type detection from the page itself. Video needs explicit
+ * signals (og:video metadata, a JSON-LD VideoObject, a known video host, or a
+ * `<video>` element); an article declaration beats those, so pages that
+ * merely embed a video are not misclassified.
+ */
+export const detectClipCategory = (document: Document): string => {
+  const ogType = metaContent(document, 'meta[property="og:type" i]').toLowerCase();
+  const hasOgVideo = !!document.querySelector(
+    'meta[property="og:video" i], meta[property="og:video:url" i], meta[property="og:video:secure_url" i]'
+  );
+  const jsonLdType = getJsonLdType(document);
+  const isArticle = ogType === 'article' || ARTICLE_JSON_LD_TYPES.test(jsonLdType);
+  const isVideo =
+    ogType.startsWith('video') ||
+    hasOgVideo ||
+    VIDEO_JSON_LD_TYPES.test(jsonLdType) ||
+    isVideoHostUrl(document.URL) ||
+    !!document.querySelector('video');
+  if (isVideo && !isArticle) {
+    return CATEGORY_VIDEO;
+  }
+  return CATEGORY_ARTICLE;
+};
+
 export const extractTemplateVariables = (document: Document): TemplateVariables => {
   return {
     TITLE: document.title || '',
@@ -240,6 +321,7 @@ export const extractTemplateVariables = (document: Document): TemplateVariables 
     IMAGE:
       metaContent(document, 'meta[property="og:image" i]') ||
       metaContent(document, 'meta[name="twitter:image" i]'),
+    CATEGORY: detectClipCategory(document),
   };
 };
 

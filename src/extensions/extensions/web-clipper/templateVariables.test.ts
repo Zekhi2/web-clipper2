@@ -5,12 +5,14 @@ import {
   countHanzi,
   countParagraphs,
   countWords,
+  detectClipCategory,
   extractTemplateVariables,
   extractTemplateVariablesAsync,
   getDate,
   getPublishedFromUrl,
   getTime,
 } from './templateVariables';
+import { isBookmarkStub } from '@/common/clipCategory';
 
 interface FakeMeta {
   name?: string;
@@ -25,6 +27,7 @@ const fakeDocument = (options: {
   jsonLd?: string[];
   time?: string;
   link?: { href: string };
+  videos?: boolean;
 }) => {
   const {
     title = 'Test Title',
@@ -33,6 +36,7 @@ const fakeDocument = (options: {
     jsonLd = [],
     time,
     link,
+    videos,
   } = options;
   const findMeta = (selector: string) => {
     if (selector === 'time[datetime]') {
@@ -44,6 +48,9 @@ const fakeDocument = (options: {
       return {
         getAttribute: (attribute: string) => (attribute === 'href' ? link?.href ?? null : null),
       };
+    }
+    if (selector === 'video') {
+      return videos ? {} : null;
     }
     const match = selector.match(/meta\[([a-z]+)="([^"]+)"/);
     if (!match) {
@@ -546,5 +553,67 @@ describe('getDate and getTime', () => {
 
   it('formats the current time', () => {
     expect(getTime()).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  });
+});
+
+describe('detectClipCategory', () => {
+  it('defaults to article for plain pages', () => {
+    expect(extractTemplateVariables(fakeDocument({})).CATEGORY).toBe('📄 Article');
+  });
+
+  it('detects video via og:type and og:video metadata', () => {
+    expect(
+      detectClipCategory(fakeDocument({ metas: [{ property: 'og:type', content: 'video.other' }] }))
+    ).toBe('🎬 Video');
+    expect(
+      detectClipCategory(fakeDocument({ metas: [{ property: 'og:video', content: 'https://v.example/x.mp4' }] }))
+    ).toBe('🎬 Video');
+  });
+
+  it('detects video via JSON-LD and known video hosts', () => {
+    expect(
+      detectClipCategory(
+        fakeDocument({ jsonLd: ['{"@type":"VideoObject","name":"t"}'] })
+      )
+    ).toBe('🎬 Video');
+    expect(detectClipCategory(fakeDocument({ url: 'https://www.bilibili.com/video/BV1xx' }))).toBe(
+      '🎬 Video'
+    );
+    expect(detectClipCategory(fakeDocument({ url: 'https://youtu.be/abc123' }))).toBe('🎬 Video');
+  });
+
+  it('detects video via a video element when the page does not declare article', () => {
+    expect(detectClipCategory(fakeDocument({ videos: true }))).toBe('🎬 Video');
+  });
+
+  it('prefers article declarations over embedded players', () => {
+    expect(
+      detectClipCategory(
+        fakeDocument({
+          metas: [{ property: 'og:type', content: 'article' }],
+          videos: true,
+        })
+      )
+    ).toBe('📄 Article');
+    expect(
+      detectClipCategory(fakeDocument({ jsonLd: ['{"@type":"NewsArticle"}'], videos: true }))
+    ).toBe('📄 Article');
+  });
+});
+
+describe('isBookmarkStub', () => {
+  it('recognizes the built-in Bookmark tool output', () => {
+    expect(isBookmarkStub('## Link \n [https://a.com](https://a.com) \n ## Comment:')).toBe(true);
+    expect(isBookmarkStub('## 链接 \n [https://a.com](https://a.com) \n ## 备注:')).toBe(true);
+  });
+
+  it('rejects real articles and long documents', () => {
+    expect(isBookmarkStub('# 科技爱好者周刊\n\nLong body…'.repeat(20))).toBe(false);
+    expect(isBookmarkStub('')).toBe(false);
+    expect(isBookmarkStub('just a sentence')).toBe(false);
+  });
+
+  it('rejects short documents without the link heading', () => {
+    expect(isBookmarkStub('## Heading\nshort body')).toBe(false);
   });
 });
