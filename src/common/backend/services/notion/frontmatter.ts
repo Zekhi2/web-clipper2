@@ -165,3 +165,108 @@ export const buildCallout = (meta: Record<string, string>): string => {
   }
   return `<callout icon="📎">\n${lines.join('\n')}\n</callout>`;
 };
+
+const IMAGE_MARKDOWN = /!\[([^\]]*)\]\(([^)]+)\)/g;
+const LINK_WRAPPED_IMAGE = /\[!\[([^\]]*)\]\(([^)]+)\)\]\(([^)]+)\)/g;
+const IMAGE_ONLY_LINE = /^\s*!\[[^\]]*\]\([^)]+\)\s*$/;
+const LIST_OR_QUOTE_MARKER = /^\s*(?:>|[-*+]|\d+[.)])\s+/;
+
+/**
+ * Notion's Markdown parser rejects images that are not standalone blocks:
+ * an image inside paragraph text, inside a list item, inside a table cell or
+ * wrapped in a link is a hard parse error (the whole request fails with 400),
+ * while Obsidian renders all of these fine. Normalize before sending content
+ * to Notion:
+ *
+ * - link-wrapped images `[![alt](src)](href)` are unwrapped;
+ * - images inside paragraph text are split into their own blocks;
+ * - images that held a list item (or quote line) alone are pulled out of the
+ *   list, dropping the dangling marker;
+ * - images inside table cells (which only allow inline content) degrade to
+ *   plain links;
+ * - fenced code blocks are left untouched.
+ */
+export const normalizeImageBlocks = (markdown: string): string => {
+  const lines = (markdown || '').replace(/\r\n?/g, '\n').split('\n');
+  const blocks: string[] = [];
+  let inCodeFence = false;
+
+  lines.forEach((line) => {
+    if (/^\s*(```|~~~)/.test(line)) {
+      inCodeFence = !inCodeFence;
+      blocks.push(line);
+      return;
+    }
+    if (inCodeFence) {
+      blocks.push(line);
+      return;
+    }
+
+    // Table cells are inline-only: an image there is a parse error, keep a
+    // plain link instead.
+    if (/^\s*\|/.test(line)) {
+      blocks.push(
+        line.replace(LINK_WRAPPED_IMAGE, '[$1]($2)').replace(IMAGE_MARKDOWN, '[$1]($2)')
+      );
+      return;
+    }
+
+    // Unwrap link-wrapped images so the plain image rules below see them.
+    const unwrapped = line.replace(LINK_WRAPPED_IMAGE, (_match, alt: string, src: string) => {
+      return `![${alt}](${src})`;
+    });
+    if (!IMAGE_MARKDOWN.test(unwrapped)) {
+      IMAGE_MARKDOWN.lastIndex = 0;
+      blocks.push(unwrapped);
+      return;
+    }
+    IMAGE_MARKDOWN.lastIndex = 0;
+
+    const marker = LIST_OR_QUOTE_MARKER.exec(unwrapped)?.[0] || '';
+    const body = marker ? unwrapped.slice(marker.length) : unwrapped;
+
+    const segments: string[] = [];
+    let cursor = 0;
+    for (const match of body.matchAll(IMAGE_MARKDOWN)) {
+      const text = body.slice(cursor, match.index).trim();
+      if (text) {
+        segments.push(text);
+      }
+      segments.push(match[0]);
+      cursor = match.index + match[0].length;
+    }
+    const tail = body.slice(cursor).trim();
+    if (tail) {
+      segments.push(tail);
+    }
+
+    // Keep the list/quote marker attached to the first non-image segment so
+    // following list items still connect; when the marker held nothing but an
+    // image, the dangling marker is dropped.
+    if (marker) {
+      const firstText = segments.findIndex((segment) => !IMAGE_ONLY_LINE.test(segment));
+      if (firstText >= 0) {
+        segments[firstText] = `${marker}${segments[firstText]}`;
+      }
+    }
+    blocks.push(...segments);
+  });
+
+  // Images must be surrounded by blank lines, even when they were consecutive.
+  const result: string[] = [];
+  blocks.forEach((line, index) => {
+    if (IMAGE_ONLY_LINE.test(line)) {
+      if (result.length > 0 && result[result.length - 1].trim() !== '') {
+        result.push('');
+      }
+      result.push(line);
+      const next = blocks[index + 1];
+      if (next && next.trim() !== '') {
+        result.push('');
+      }
+    } else {
+      result.push(line);
+    }
+  });
+  return result.join('\n');
+};

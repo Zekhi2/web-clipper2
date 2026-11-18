@@ -1,7 +1,7 @@
 import React, { Fragment } from 'react';
 import { Form } from '@ant-design/compatible';
 import '@ant-design/compatible/assets/index.less';
-import { Input } from 'antd';
+import { Input, Select } from 'antd';
 import { FormComponentProps } from '@ant-design/compatible/lib/form';
 import { FormattedMessage } from 'react-intl';
 import localeService from '@/common/locales';
@@ -62,6 +62,75 @@ const NotionForm: React.FC<NotionFormProps & FormComponentProps> = ({
             },
           ],
         })(<Input.Password autoComplete="off" disabled={disabled} placeholder="ntn_xxxxxxxxxx" />)}
+      </Form.Item>
+
+      <Form.Item
+        label={localeService.format({
+          id: 'backend.services.notion.form.imageHandling.label',
+          defaultMessage: 'Image handling',
+        })}
+        extra={localeService.format({
+          id: 'backend.services.notion.form.imageHandling.help',
+          defaultMessage:
+            'Notion loads external images through its own servers, so some sites block them.',
+        })}
+      >
+        {getFieldDecorator('imageHandling', {
+          initialValue: initData.imageHandling || 'auto',
+        })(
+          <Select disabled={disabled}>
+            <Select.Option value="auto">
+              {localeService.format({
+                id: 'backend.services.notion.form.imageHandling.auto',
+                defaultMessage: 'Auto: keep original links, rehost blocked ones',
+              })}
+            </Select.Option>
+            <Select.Option value="always">
+              {localeService.format({
+                id: 'backend.services.notion.form.imageHandling.always',
+                defaultMessage: 'Always rehost all images',
+              })}
+            </Select.Option>
+            <Select.Option value="never">
+              {localeService.format({
+                id: 'backend.services.notion.form.imageHandling.never',
+                defaultMessage: 'Never rehost (keep original links)',
+              })}
+            </Select.Option>
+          </Select>
+        )}
+      </Form.Item>
+
+      <Form.Item
+        label={localeService.format({
+          id: 'backend.services.notion.form.rehostTarget.label',
+          defaultMessage: 'Rehost destination',
+        })}
+      >
+        {getFieldDecorator('rehostTarget', {
+          initialValue: initData.rehostTarget || 'auto',
+        })(
+          <Select disabled={disabled}>
+            <Select.Option value="auto">
+              {localeService.format({
+                id: 'backend.services.notion.form.rehostTarget.auto',
+                defaultMessage: 'Auto: image host first, then Notion storage',
+              })}
+            </Select.Option>
+            <Select.Option value="imageHosting">
+              {localeService.format({
+                id: 'backend.services.notion.form.rehostTarget.imageHosting',
+                defaultMessage: 'My image host only',
+              })}
+            </Select.Option>
+            <Select.Option value="notion">
+              {localeService.format({
+                id: 'backend.services.notion.form.rehostTarget.notion',
+                defaultMessage: 'Notion file storage only',
+              })}
+            </Select.Option>
+          </Select>
+        )}
       </Form.Item>
 
       <div

@@ -59,3 +59,61 @@ describe('frontmatter helpers', () => {
   });
 });
 
+describe('normalizeImageBlocks (Notion standalone-image rule)', () => {
+  test('leaves standalone images and plain text untouched', () => {
+    const markdown = 'paragraph text\n\n![alt](https://example.com/a.jpg)\n\nmore text';
+    expect(normalizeImageBlocks(markdown)).toBe(markdown);
+  });
+
+  test('splits an image inline with paragraph text into its own block', () => {
+    expect(normalizeImageBlocks('前文 ![img](https://example.com/a.jpg) 后文')).toBe(
+      '前文\n\n![img](https://example.com/a.jpg)\n\n后文'
+    );
+  });
+
+  test('unwraps link-wrapped images', () => {
+    expect(
+      normalizeImageBlocks('[![img](https://example.com/a.jpg)](https://example.com)')
+    ).toBe('![img](https://example.com/a.jpg)');
+    // Mixed with text: the image goes standalone, the link text stays.
+    expect(
+      normalizeImageBlocks('see [![img](https://example.com/a.jpg)](https://example.com) here')
+    ).toBe('see\n\n![img](https://example.com/a.jpg)\n\nhere');
+  });
+
+  test('pulls an image out of a list item it held alone', () => {
+    expect(normalizeImageBlocks('- ![img](https://example.com/a.jpg)')).toBe(
+      '![img](https://example.com/a.jpg)'
+    );
+    // A list item with text keeps its marker.
+    expect(normalizeImageBlocks('- text ![img](https://example.com/a.jpg)')).toBe(
+      '- text\n\n![img](https://example.com/a.jpg)'
+    );
+  });
+
+  test('separates consecutive images with a blank line', () => {
+    expect(
+      normalizeImageBlocks('![a](https://example.com/a.jpg)\n![b](https://example.com/b.jpg)')
+    ).toBe('![a](https://example.com/a.jpg)\n\n![b](https://example.com/b.jpg)');
+    expect(
+      normalizeImageBlocks('![a](https://example.com/a.jpg) ![b](https://example.com/b.jpg)')
+    ).toBe('![a](https://example.com/a.jpg)\n\n![b](https://example.com/b.jpg)');
+  });
+
+  test('downgrades table-cell images to plain links', () => {
+    expect(normalizeImageBlocks('| A | B |\n| --- | --- |\n| ![img](https://example.com/a.jpg) | x |')).toBe(
+      '| A | B |\n| --- | --- |\n| [img](https://example.com/a.jpg) | x |'
+    );
+  });
+
+  test('leaves fenced code blocks untouched', () => {
+    const markdown = '```\ntext ![img](https://example.com/a.jpg) more\n```';
+    expect(normalizeImageBlocks(markdown)).toBe(markdown);
+  });
+
+  test('ensures blank lines around images next to surrounding text', () => {
+    expect(normalizeImageBlocks('text\n![img](https://example.com/a.jpg)\ntext')).toBe(
+      'text\n\n![img](https://example.com/a.jpg)\n\ntext'
+    );
+  });
+});

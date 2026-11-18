@@ -18,7 +18,8 @@ export default new ToolExtension(
   },
   {
     init: ({ pathname, currentImageHostingService }) =>
-      pathname.startsWith('/plugins') && !!currentImageHostingService,
+      !!currentImageHostingService &&
+      (pathname.startsWith('/plugins') || pathname === '/' || pathname === '/editor'),
     afterRun: async context => {
       const { data, imageService, message } = context;
       let foo = data;
