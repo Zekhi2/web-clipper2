@@ -144,6 +144,143 @@ describe('NotionDocumentService (official REST API + PAT)', () => {
     expect(body.properties.Name.title[0].text.content).toBe('Row');
   });
 
+  test('frontmatter becomes a callout on a page parent and the duplicate H1 is removed', async () => {
+    const { service, calls } = setup((url) => {
+      if (url === '/pages') {
+        return { data: { id: 'new-3', url: 'https://www.notion.so/new3' } };
+      }
+      return { data: null };
+    });
+    await service.createDocument({
+      repositoryId: 'pg',
+      title: '科技爱好者周刊（第 403 期）：为什么 Dropbox 不成功 - 阮一峰的网络日志',
+      content: [
+        '---',
+        'clipped: 2026-11-17',
+        'source: www.ruanyifeng.com',
+        'tags: WebClipper',
+        '---',
+        '# 科技爱好者周刊（第 403 期）：为什么 Dropbox 不成功',
+        '',
+        '> 来源: [阮一峰的网络日志](https://www.ruanyifeng.com/blog/2026/07/weekly-issue-403.html)',
+      ].join('\n'),
+    });
+    const body = calls.find((call) => call.url === '/pages')!.data;
+    expect(body.markdown).toContain('<callout icon="📎">');
+    expect(body.markdown).toContain('来源: [www.ruanyifeng.com](https://www.ruanyifeng.com)');
+    expect(body.markdown).toContain('标签: WebClipper');
+    expect(body.markdown).not.toContain('clipped:');
+    expect(body.markdown).not.toContain('# 科技爱好者周刊');
+    expect(body.markdown).toContain('> 来源:');
+  });
+
+  test('frontmatter maps to real database properties by name and type', async () => {
+    const { service, calls } = setup((url) => {
+      if (url === '/pages/ds2' || url === '/databases/ds2') {
+        return Promise.reject({ response: { status: 404 } });
+      }
+      if (url === '/data_sources/ds2') {
+        return {
+          data: {
+            properties: {
+              Name: { type: 'title' },
+              Clipped: { type: 'date' },
+              Source: { type: 'url' },
+              Tags: { type: 'multi_select' },
+              Author: { type: 'rich_text' },
+            },
+          },
+        };
+      }
+      if (url === '/pages') {
+        return { data: { id: 'new-4', url: 'https://www.notion.so/new4' } };
+      }
+      return { data: null };
+    });
+    await service.createDocument({
+      repositoryId: 'ds2',
+      title: 'Clip title',
+      content: [
+        '---',
+        'clipped: 2026-11-17',
+        'source: www.ruanyifeng.com',
+        'tags: WebClipper, Notion',
+        'author: 阮一峰',
+        'unmapped: keep me',
+        '---',
+        '# Clip title',
+        'hello',
+      ].join('\n'),
+    });
+    const body = calls.find((call) => call.url === '/pages')!.data;
+    expect(body.properties).toMatchObject({
+      Name: { title: [{ text: { content: 'Clip title' } }] },
+      Clipped: { date: { start: '2026-11-17' } },
+      Source: { url: 'https://www.ruanyifeng.com' },
+      Tags: { multi_select: [{ name: 'WebClipper' }, { name: 'Notion' }] },
+      Author: { rich_text: [{ text: { content: '阮一峰' } }] },
+    });
+    expect(body.properties.unmapped).toBeUndefined();
+    expect(body.markdown).toContain('unmapped: keep me');
+    expect(body.markdown).not.toContain('clipped:');
+  });
+
+  test('aliases match the Web Clips template and read-only properties are skipped', async () => {
+    const { service, calls } = setup((url) => {
+      if (url === '/pages/ds3' || url === '/databases/ds3') {
+        return Promise.reject({ response: { status: 404 } });
+      }
+      if (url === '/data_sources/ds3') {
+        return {
+          data: {
+            properties: {
+              Title: { type: 'title' },
+              'userDefined:URL': { type: 'url' },
+              Source: { type: 'formula' },
+              Tags: { type: 'multi_select' },
+              Author: { type: 'rich_text' },
+              Published: { type: 'date' },
+              'Created at': { type: 'created_time' },
+            },
+          },
+        };
+      }
+      if (url === '/pages') {
+        return { data: { id: 'new-5', url: 'https://www.notion.so/new5' } };
+      }
+      return { data: null };
+    });
+    await service.createDocument({
+      repositoryId: 'ds3',
+      title: '科技爱好者周刊（第 403 期）',
+      content: [
+        '---',
+        'clipped: 2026-11-17',
+        'source: www.ruanyifeng.com',
+        'author: ',
+        'published: ',
+        'tags: WebClipper',
+        '---',
+        '# 科技爱好者周刊（第 403 期）',
+        'hello',
+      ].join('\n'),
+    });
+    const body = calls.find((call) => call.url === '/pages')!.data;
+    expect(body.properties).toMatchObject({
+      Title: { title: [{ text: { content: '科技爱好者周刊（第 403 期）' } }] },
+      'userDefined:URL': { url: 'https://www.ruanyifeng.com' },
+      Tags: { multi_select: [{ name: 'WebClipper' }] },
+    });
+    // The formula property must never be written.
+    expect(body.properties.Source).toBeUndefined();
+    // Empty fields and `clipped` (covered by `Created at`) stay out entirely.
+    expect(body.properties.Author).toBeUndefined();
+    expect(body.properties.Published).toBeUndefined();
+    expect(body.markdown).not.toContain('clipped');
+    expect(body.markdown).not.toContain('作者');
+    expect(body.markdown).toContain('hello');
+  });
+
   test('a 401 is reported as an invalid token', async () => {
     const { service } = setup((url) => {
       if (url === '/users/me') {
