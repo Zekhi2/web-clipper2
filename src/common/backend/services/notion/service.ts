@@ -1,51 +1,102 @@
 import localeService from '@/common/locales';
-import { ICookieService } from '@/service/common/cookie';
-import { IWebRequestService } from '@/service/common/webRequest';
-import { generateUuid } from '@web-clipper/shared/lib/uuid';
 import axios, { AxiosInstance } from 'axios';
-import Container from 'typedi';
 import { CreateDocumentRequest, DocumentService } from '../../index';
 import { CompleteStatus, UnauthorizedError } from './../interface';
-import { NotionRepository, NotionUserContent, RecentPages } from './types';
+import { NotionRepository } from './types';
 
-const PAGE = 'page';
-const COLLECTION_VIEW_PAGE = 'collection_view_page';
-const origin = 'https://www.notion.so/';
+const NOTION_API_BASE = 'https://api.notion.com/v1';
+const NOTION_VERSION = '2026-03-11';
+const MAX_SEARCH_PAGES = 5;
 
+type NotionObjectType = 'page' | 'database' | 'data_source';
+
+interface NotionServiceConfig {
+  personalAccessToken?: string;
+}
+
+interface NotionUserResponse {
+  id: string;
+  name: string;
+  avatar_url: string | null;
+  email?: string;
+  person?: { email: string };
+}
+
+interface NotionSearchItem {
+  id: string;
+  url: string;
+  object: string;
+  title?: Array<{ plain_text: string }>;
+  properties?: Record<string, any>;
+  parent?: {
+    type?: string;
+    workspace?: boolean;
+  } | null;
+}
+
+interface NotionSearchResponse {
+  results: NotionSearchItem[];
+  next_cursor: string | null;
+  has_more: boolean;
+}
+
+interface NotionCreatePageResponse {
+  id: string;
+  url: string;
+}
+
+/**
+ * Notion backend backed by the official REST API and a Personal Access Token.
+ *
+ * The old implementation borrowed the browser's notion.so cookies and called
+ * Notion's private `api/v3` endpoints. Notion has since tightened security on
+ * those endpoints so they return 401 even for logged-in users, which broke this
+ * service (and every other clipper using the same trick).
+ */
 export default class NotionDocumentService implements DocumentService {
   private request: AxiosInstance;
-  private repositories: NotionRepository[];
-  private userContent?: NotionUserContent;
-  private webRequestService: IWebRequestService;
-  private cookieService: ICookieService;
+  private repositories: NotionRepository[] = [];
+  private me?: NotionUserResponse;
+  /** Filled by getRepositories() so createDocument() can pick the right parent key. */
+  private repositoryTypeMap: Record<string, NotionObjectType> = {};
 
-  constructor() {
-    const request = axios.create({
-      baseURL: origin,
-      timeout: 10000,
-      transformResponse: [
-        (data): any => {
-          return JSON.parse(data);
-        },
-      ],
-      withCredentials: true,
+  constructor(config: NotionServiceConfig = {}) {
+    const token = (config.personalAccessToken || '').trim();
+    if (!token) {
+      throw new UnauthorizedError(
+        localeService.format({
+          id: 'backend.services.notion.pat.missing',
+          defaultMessage:
+            'Please add a Notion Personal Access Token (ntn_...) in the account settings.',
+        })
+      );
+    }
+    this.request = axios.create({
+      baseURL: NOTION_API_BASE,
+      timeout: 15000,
+      headers: {
+        'Content-Type': 'application/json',
+        'Notion-Version': NOTION_VERSION,
+        Authorization: `Bearer ${token}`,
+      },
     });
-    this.request = request;
-    this.repositories = [];
-    this.webRequestService = Container.get(IWebRequestService);
-    this.cookieService = Container.get(ICookieService);
     this.request.interceptors.response.use(
-      (r) => r,
+      (response) => response,
       (error) => {
         if (error.response && error.response.status === 401) {
           return Promise.reject(
             new UnauthorizedError(
               localeService.format({
-                id: 'backend.services.notion.unauthorizedErrorMessage',
-                defaultMessage: 'Unauthorized! Please Login Notion Web.',
+                id: 'backend.services.notion.pat.invalid',
+                defaultMessage:
+                  'Invalid Notion Personal Access Token. Please recreate it and check page connections.',
               })
             )
           );
+        }
+        const data = error.response && error.response.data;
+        if (data && data.message) {
+          return Promise.reject(new Error(`Notion API (${data.status || 'err'}/${data.code || ''}): ${data.message}`));
         }
         return Promise.reject(error);
       }
@@ -57,391 +108,187 @@ export default class NotionDocumentService implements DocumentService {
   };
 
   getUserInfo = async () => {
-    if (!this.userContent) {
-      this.userContent = await this.getUserContent();
+    if (!this.me) {
+      const { data } = await this.request.get<NotionUserResponse>('/users/me');
+      this.me = data;
     }
-    const user = this.userContent.recordMap.notion_user;
-    const userInfo = Object.values(user)[0];
-    const { email, profile_photo, name } = userInfo.value;
+    const user = this.me;
+    const email = user.email || user.person?.email || '';
     return {
-      name,
-      avatar: profile_photo,
+      name: user.name || 'Notion',
+      avatar: user.avatar_url || 'https://www.notion.so/images/favicon.ico',
       homePage: 'https://www.notion.so/',
       description: email,
     };
   };
 
-  getRepositories = async () => {
-    if (!this.userContent) {
-      this.userContent = await this.getUserContent();
+  private getTitle(item: NotionSearchItem): string {
+    if (item.properties) {
+      const titleProperty = Object.values<any>(item.properties).find(
+        (property) => property && property.type === 'title' && Array.isArray(property.title)
+      );
+      if (titleProperty) {
+        const title = titleProperty.title
+          .map((part: any) => part.plain_text || part.text?.content || '')
+          .join('');
+        if (title.trim()) {
+          return title;
+        }
+      }
+    }
+    if (Array.isArray(item.title)) {
+      const title = item.title.map((part) => part.plain_text || '').join('');
+      if (title.trim()) {
+        return title;
+      }
+    }
+    return localeService.format({
+      id: 'backend.services.notion.untitled',
+      defaultMessage: '(Untitled)',
+    });
+  }
+
+  getRepositories = async (): Promise<NotionRepository[]> => {
+    if (this.repositories.length > 0) {
+      return this.repositories;
     }
 
-    const userId = Object.keys(this.userContent.recordMap.notion_user)[0] as string;
-    const spaces = (await this.getSpaces(userId)) as any;
-    const result: Array<NotionRepository[]> = await Promise.all(
-      Object.keys(spaces).map(async (p) => {
-        const space = spaces[p];
-        const recentPages = await this.getRecentPageVisits(space.spaceId, userId);
-        const spaceName = await this.getSpaceName(space.spaceId);
-        return this.loadSpace(space.spaceId, spaceName, recentPages);
+    const result: NotionRepository[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < MAX_SEARCH_PAGES; page++) {
+      const body: Record<string, any> = {
+        page_size: 100,
+        sort: { timestamp: 'last_edited_time', direction: 'descending' },
+      };
+      if (cursor) {
+        body.start_cursor = cursor;
+      }
+      const { data } = await this.request.post<NotionSearchResponse>('/search', body);
+      data.results.forEach((item) => {
+        if (item.object !== 'page' && item.object !== 'database' && item.object !== 'data_source') {
+          return;
+        }
+        const objectType = item.object as NotionObjectType;
+        result.push({
+          id: item.id,
+          name: `${objectType === 'page' ? '📄' : '🗃️'} ${this.getTitle(item)}`,
+          groupId: 'workspace',
+          groupName: 'Notion',
+          notionObjectType: objectType,
+        });
+        this.repositoryTypeMap[item.id] = objectType;
+      });
+      cursor = data.has_more ? data.next_cursor : null;
+      if (!cursor) {
+        break;
+      }
+    }
+
+    if (result.length === 0) {
+      throw new Error(
+        localeService.format({
+          id: 'backend.services.notion.repository.empty',
+          defaultMessage:
+            'No pages or databases are accessible to this token. Open the target page in Notion → ... → Add connections → select your integration.',
+        })
+      );
+    }
+    this.repositories = result;
+    return result;
+  };
+
+  /** Figure out which parent key `POST /pages` expects for a repository id. */
+  private detectParentType = async (repositoryId: string): Promise<NotionObjectType> => {
+    const known = this.repositoryTypeMap[repositoryId];
+    if (known) {
+      return known;
+    }
+    const candidates: Array<[NotionObjectType, string]> = [
+      ['page', `/pages/${repositoryId}`],
+      ['database', `/databases/${repositoryId}`],
+      ['data_source', `/data_sources/${repositoryId}`],
+    ];
+    for (const [objectType, path] of candidates) {
+      try {
+        await this.request.get(path);
+        this.repositoryTypeMap[repositoryId] = objectType;
+        return objectType;
+      } catch (_error) {
+        // Try the next object type.
+      }
+    }
+    throw new Error(
+      localeService.format({
+        id: 'backend.services.notion.repository.notFound',
+        defaultMessage:
+          'Repository not found or not shared with your integration. Open the page in Notion and connect your integration via the ... menu.',
       })
     );
-
-    this.repositories = result.flat() as NotionRepository[];
-    return this.repositories;
   };
 
-  getSpaces = async (userId: string) => {
-    const response = await this.requestWithCookie.post<{
-      users: {
-        [id: string]: {
-          user_root: {
-            [id: string]: {
-              value: {
-                space_view_pointers: [
-                  {
-                    id: string;
-                    table: string;
-                    spaceId: string;
-                  }
-                ]
-              }
-            };
-          }
-          space: any;
-        };
-      };
-    }>('/api/v3/getSpacesInitial');
-    return response.data.users[userId].user_root[userId].value.space_view_pointers;
+  /** Fetch the parent's property schema so frontmatter keys can be mapped to
+   * real Notion properties (with their actual names and types). */
+  private getParentProperties = async (
+    repositoryId: string,
+    objectType: NotionObjectType
+  ): Promise<{ schema: Record<string, any>; titleName: string }> => {
+    if (objectType === 'page') {
+      return { schema: {}, titleName: 'title' };
+    }
+    try {
+      const path =
+        objectType === 'data_source'
+          ? `/data_sources/${repositoryId}`
+          : `/databases/${repositoryId}`;
+      const { data } = await this.request.get(path);
+      const schema: Record<string, any> = data.properties || {};
+      const titleEntry = Object.entries<any>(schema).find(
+        ([, property]) => property && property.type === 'title'
+      );
+      return { schema, titleName: titleEntry ? titleEntry[0] : 'title' };
+    } catch (_error) {
+      return { schema: {}, titleName: 'title' };
+    }
   };
-
-  getSpaceName = async (spaceId: string) => {
-    const response = await this.requestWithCookie.post<{
-      results: [
-        {
-          name: string;
-        }
-      ]
-    }>('api/v3/getPublicSpaceData', {
-      spaceIds: [spaceId],
-      type: 'space-ids'
-    });
-    return response.data.results[0].name;
-  }
 
   createDocument = async ({
-    repositoryId,
     title,
     content,
+    repositoryId,
   }: CreateDocumentRequest): Promise<CompleteStatus> => {
-    let fileName = `${title}.md`;
-
-    const repository = this.repositories.find((o) => o.id === repositoryId);
-    if (!repository) {
-      throw new Error('Illegal repository');
+    if (!repositoryId) {
+      throw new Error(
+        localeService.format({
+          id: 'backend.services.notion.repository.required',
+          defaultMessage: 'Please choose a default repository (Notion page or database) first.',
+        })
+      );
     }
+    const objectType = await this.detectParentType(repositoryId);
+    const safeTitle = title || 'Clipped Note';
+    const parent =
+      objectType === 'page'
+        ? { page_id: repositoryId }
+        : objectType === 'data_source'
+        ? { data_source_id: repositoryId }
+        : { database_id: repositoryId };
 
-    const documentId = await this.createEmptyFile(repository, content);
-    const fileUrl = await this.getFileUrl(encodeURI(fileName));
-    await axios.put(fileUrl.signedPutUrl, `${content}`, {
-      headers: {
-        'Content-Type': 'text/markdown',
-      },
-    });
-    if (!this.userContent) {
-      this.userContent = await this.getUserContent();
-    }
-    const spaceId = await this.getSpaceId();
-    await this.requestWithCookie.post('api/v3/enqueueTask', {
-      task: {
-        eventName: 'importFile',
-        request: {
-          fileURL: fileUrl.url,
-          fileName,
-          importType: 'ReplaceBlock',
-          block: {
-            id: documentId,
-            spaceId: spaceId,
-          },
-          spaceId: spaceId,
-          signedToken: fileUrl.signedToken,
-        },
-      },
-    });
+    const { titleName } = await this.getParentProperties(repositoryId, objectType);
+    const properties: Record<string, any> = {
+      [titleName]: { title: [{ text: { content: safeTitle } }] },
+    };
 
+    const body: Record<string, any> = {
+      parent,
+      icon: { emoji: '📌' },
+      markdown_version: 'v2',
+      markdown: content,
+      properties,
+    };
+
+    const { data } = await this.request.post<NotionCreatePageResponse>('/pages', body);
     return {
-      href: `https://www.notion.so/${repository.groupId}/${documentId.replace(/-/g, '')}`,
+      href: data.url || `https://www.notion.so/${data.id.replace(/-/g, '')}`,
     };
   };
-
-  getSpaceId = async () => {
-    if (!this.userContent) {
-      this.userContent = await this.getUserContent();
-    }
-
-    const userId = Object.keys(this.userContent.recordMap.notion_user)[0] as string;
-    const spaces = (await this.getSpaces(userId)) as any;
-    return spaces[0].spaceId;
-  };
-
-  createEmptyFile = async (repository: NotionRepository, title: string) => {
-    if (!this.userContent) {
-      this.userContent = await this.getUserContent();
-    }
-    const spaceId = await this.getSpaceId();
-    const documentId = generateUuid();
-    const requestId = generateUuid();
-    const inner_requestId = generateUuid();
-    const parentId = repository.id;
-    const userId = Object.values(this.userContent.recordMap.notion_user)[0].value.id;
-    const time = new Date().getDate();
-    let operations;
-    if (repository.pageType === PAGE) {
-      operations = [
-        {
-          id: documentId,
-          table: 'block',
-          path: [],
-          command: 'set',
-          args: {
-            type: 'page',
-            id: documentId,
-            space_id: spaceId,
-            version: 1,
-          },
-        },
-        {
-          id: documentId,
-          table: 'block',
-          path: [],
-          command: 'update',
-          args: {
-            parent_id: parentId,
-            parent_table: 'block',
-            alive: true,
-            space_id: spaceId,
-          },
-        },
-        {
-          table: 'block',
-          id: parentId,
-          path: ['content'],
-          command: 'listAfter',
-          args: {
-            id: documentId,
-            space_id: spaceId,
-          },
-        },
-        {
-          id: documentId,
-          table: 'block',
-          path: [],
-          command: 'update',
-          args: {
-            created_by: userId,
-            created_time: time,
-            last_edited_time: time,
-            last_edited_by: userId,
-            space_id: spaceId,
-          },
-        },
-        {
-          id: parentId,
-          table: 'block',
-          path: [],
-          command: 'update',
-          args: {
-            last_edited_time: time,
-            space_id: spaceId,
-          },
-        },
-        {
-          id: documentId,
-          table: 'block',
-          path: ['properties', 'title'],
-          command: 'set',
-          args: [[title]],
-        },
-        {
-          id: documentId,
-          table: 'block',
-          path: [],
-          command: 'update',
-          args: {
-            last_edited_time: time,
-            space_id: spaceId,
-          },
-        },
-      ];
-    } else if (repository.pageType === COLLECTION_VIEW_PAGE) {
-      operations = [
-        {
-          id: documentId,
-          table: 'block',
-          path: [],
-          command: 'set',
-          args: {
-            type: 'page',
-            id: documentId,
-            space_id: spaceId,
-            version: 1,
-          },
-        },
-        {
-          id: documentId,
-          table: 'block',
-          path: [],
-          command: 'update',
-          args: {
-            parent_id: parentId,
-            parent_table: 'collection',
-            space_id: spaceId,
-            alive: true,
-          },
-        },
-      ];
-    }
-
-    await this.requestWithCookie.post('api/v3/saveTransactionsFanout', {
-      requestId: requestId,
-      transactions: [
-        {
-          id: inner_requestId,
-          operations: operations,
-          spaceId: spaceId,
-        }
-      ]
-    });
-    return documentId;
-  };
-
-  getFileUrl = async (fileName: string) => {
-    const result = await this.requestWithCookie.post<{
-      url: string;
-      signedPutUrl: string;
-      signedToken: string;
-    }>('api/v3/getUploadFileUrl', {
-      bucket: 'temporary',
-      name: fileName,
-      contentType: 'text/markdown',
-    });
-    return result.data;
-  };
-
-  private async loadSpace(
-    spaceId: string,
-    spaceName: string,
-    recentPages: RecentPages
-  ): Promise<NotionRepository[]> {
-    const response = await this.requestWithCookie.post<{
-      pages: string[];
-      recordMap: {
-        block: {
-          [id: string]: {
-            value: {
-              collection_id: string;
-              id: string;
-              type: string;
-              space_id: string;
-              properties: {
-                title: string[];
-              };
-            };
-          };
-        };
-      };
-    }>('api/v3/getUserSharedPagesInSpace', {
-      includeDeleted: false,
-      includeTeamSharedPages: false,
-      spaceId,
-    });
-
-    const pages: string[] = response.data.pages as string[];
-
-    return pages
-      .map((pageId): NotionRepository | null => {
-        const value = response.data.recordMap.block[pageId]!.value;
-        if (value.type === PAGE && !!value.properties && !!value.properties.title) {
-          return {
-            id: value.id,
-            name: value.properties.title.toString(),
-            groupId: spaceId,
-            groupName: spaceName,
-            pageType: PAGE,
-          };
-        }
-        const collections = recentPages.recordMap.collection;
-        if (
-          value.type === COLLECTION_VIEW_PAGE &&
-          !!value.collection_id &&
-          !!collections &&
-          !!collections[value.collection_id] &&
-          !!collections[value.collection_id].value &&
-          !!collections[value.collection_id].value.name
-        ) {
-          return {
-            id: collections[value.collection_id].value.id,
-            name: collections[value.collection_id].value.name.toString(),
-            groupId: spaceId,
-            groupName: spaceName,
-            pageType: COLLECTION_VIEW_PAGE,
-          };
-        }
-        return null;
-      })
-      .filter((p): p is NotionRepository => !!p);
-  }
-
-  private async getRecentPageVisits(spaceId: string, userId: string): Promise<RecentPages> {
-    const res = await this.requestWithCookie.post<RecentPages>('api/v3/getRecentPageVisits', {
-      spaceId,
-      userId,
-    });
-    return res.data;
-  }
-
-  private getUserContent = async () => {
-    const response = await this.requestWithCookie.post<NotionUserContent>('api/v3/loadUserContent');
-    return response.data;
-  };
-
-  /**
-   * Modify the cookie when request
-   */
-  private get requestWithCookie() {
-    const post = async <T>(url: string, data?: any) => {
-      const cookies = await this.cookieService.getAll({
-        url: origin,
-      });
-      const cookieString = cookies.map((o) => `${o.name}=${o.value}`).join(';');
-      const header = await this.webRequestService.startChangeHeader({
-        urls: [`${origin}*`],
-        requestHeaders: [
-          {
-            name: 'cookie',
-            value: cookieString,
-          },
-          {
-            name: `Content-Type`,
-            value: 'application/json',
-          },
-        ],
-      });
-      try {
-        const result = await this.request.post<T>(
-          await this.webRequestService.changeUrl(url, header),
-          data,
-          {}
-        );
-        await this.webRequestService.end(header);
-        return result;
-      } catch (error) {
-        await this.webRequestService.end(header);
-        throw error;
-      }
-    };
-    return {
-      post,
-    };
-  }
 }
