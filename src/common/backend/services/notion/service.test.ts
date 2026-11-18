@@ -1,6 +1,10 @@
-import { describe, test, expect, beforeEach, vi } from 'vitest';
+import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
 import axios from 'axios';
+import Container from 'typedi';
 import NotionDocumentService from '@/common/backend/services/notion/service';
+import { IBasicRequestService } from '@/service/common/request';
+import { IWebRequestService } from '@/service/common/webRequest';
+import { SERVER_FETCH_USER_AGENT } from '@/common/backend/services/notion/imageHandling';
 
 vi.mock('@/common/locales', () => ({
   default: {
@@ -56,6 +60,43 @@ function setup(responses: (url: string, data?: any) => any, config: Record<strin
 beforeEach(() => {
   vi.restoreAllMocks();
 });
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  Container.remove(IBasicRequestService);
+  Container.remove(IWebRequestService);
+});
+
+/**
+ * A fake of the extension's declarativeNetRequest header rewriting
+ * (`src/service/webRequest/browser/background/tabService.ts`): headers are
+ * "rewritten" for one request whose URL carries the returned marker query.
+ */
+function installServerFetchProbe() {
+  const headerChanges: Array<Array<{ name: string; value: string }>> = [];
+  const webRequest = {
+    startChangeHeader: vi.fn(async ({ requestHeaders }: any) => {
+      headerChanges.push(requestHeaders);
+      return { name: 'probe', value: 'uuid-1' };
+    }),
+    changeUrl: vi.fn(
+      async (url: string, header: { name: string; value: string }) =>
+        `${url}${url.includes('?') ? '&' : '?'}${header.name}=${header.value}`
+    ),
+    end: vi.fn(async () => {}),
+    requestInBackground: vi.fn(),
+  };
+  Container.set(IWebRequestService, webRequest as any);
+  return { webRequest, headerChanges };
+}
+
+function installDownloader(
+  fn: (url: string) => Promise<Blob>
+) {
+  const download = vi.fn(fn);
+  Container.set(IBasicRequestService, { download } as any);
+  return download;
+}
 
 describe('NotionDocumentService (official REST API + PAT)', () => {
   test('rejects a missing token', () => {
@@ -354,6 +395,182 @@ describe('NotionDocumentService (official REST API + PAT)', () => {
     });
     const body = calls.find((call) => call.url === '/pages')!.data;
     expect(body.properties.Category).toEqual({ select: { name: '🔖 Bookmark' } });
+  });
+
+  test('inline images in the clip content are normalized to standalone blocks', async () => {
+    const { service, calls } = setup((url) => {
+      if (url === '/pages') {
+        return { data: { id: 'new-8', url: 'https://www.notion.so/new8' } };
+      }
+      return { data: null };
+    });
+    await service.createDocument({
+      repositoryId: 'pg',
+      title: 'With images',
+      content: 'see ![img](https://example.com/a.jpg) here',
+    });
+    const body = calls.find((call) => call.url === '/pages')!.data;
+    expect(body.markdown).toBe('see\n\n![img](https://example.com/a.jpg)\n\nhere');
+  });
+
+  test('auto probes with a server identity and keeps original URLs for accessible images', async () => {
+    const { headerChanges } = installServerFetchProbe();
+    const download = installDownloader(async () => new Blob(['x'], { type: 'image/jpeg' }));
+    const { service, calls } = setup((url) => {
+      if (url === '/pages') {
+        return { data: { id: 'new-9', url: 'https://www.notion.so/new9' } };
+      }
+      return { data: null };
+    });
+    await service.createDocument({
+      repositoryId: 'pg',
+      title: 'Accessible image',
+      content: '![img](https://cdn.example.com/a.jpg)',
+    });
+    // The probe fetches with the rewritten non-browser User-Agent header.
+    expect(headerChanges).toEqual([
+      [{ name: 'user-agent', value: SERVER_FETCH_USER_AGENT }],
+    ]);
+    // One probe download, no rehosting traffic (only the parent-type GET and
+    // the page POST).
+    expect(download).toHaveBeenCalledTimes(1);
+    expect(calls.every((call) => call.url === '/pages' || call.url === '/pages/pg')).toBe(true);
+    const body = calls.find((call) => call.url === '/pages')!.data;
+    expect(body.markdown).toBe('![img](https://cdn.example.com/a.jpg)');
+  });
+
+  test('never mode does not probe or rehost at all', async () => {
+    const download = vi.fn();
+    Container.set(IBasicRequestService, { download } as any);
+    const { service, calls } = setup(
+      (url) => {
+        if (url === '/pages') {
+          return { data: { id: 'new-10', url: 'https://www.notion.so/new10' } };
+        }
+        return { data: null };
+      },
+      { imageHandling: 'never' }
+    );
+    await service.createDocument({
+      repositoryId: 'pg',
+      title: 'Untouched images',
+      content: '![img](https://pic3.zhimg.com/a.jpg)',
+    });
+    expect(download).not.toHaveBeenCalled();
+    expect(calls.every((call) => call.url === '/pages' || call.url === '/pages/pg')).toBe(true);
+  });
+
+  test('server-blocked images are rehosted through the Notion File Upload API', async () => {
+    installServerFetchProbe();
+    // Probe requests (scoped by the marker query) hit the CDN's anti-bot
+    // rejection page; the browser identity can still fetch the real bytes.
+    const download = installDownloader(async (url) =>
+      url.includes('probe=')
+        ? new Blob(['<html>567</html>'], { type: 'text/html' })
+        : new Blob(['x'], { type: 'image/jpeg' })
+    );
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ status: 'uploaded' }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { service, calls } = setup(
+      (url) => {
+        if (url === '/pages') {
+          return { data: { id: 'pg9', url: 'https://www.notion.so/pg9' } };
+        }
+        if (url === '/blocks/pg9/children') {
+          return {
+            data: {
+              results: [
+                {
+                  type: 'image',
+                  id: 'b1',
+                  image: { external: { url: 'https://pic3.zhimg.com/a.jpg' } },
+                },
+                { type: 'paragraph', id: 'b2' },
+              ],
+            },
+          };
+        }
+        if (url === '/file_uploads') {
+          return { data: { id: 'fu1', upload_url: 'https://upload.notion.com/fu1' } };
+        }
+        return { data: null };
+      },
+      { imageHandling: 'auto', rehostTarget: 'notion' }
+    );
+    await service.createDocument({
+      repositoryId: 'pg',
+      title: 'Blocked image',
+      content: '![img](https://pic3.zhimg.com/a.jpg)',
+    });
+    // The page is created with the original URL first; the block is patched
+    // to the Notion-hosted upload afterwards.
+    const body = calls.find((call) => call.url === '/pages')!.data;
+    expect(body.markdown).toBe('![img](https://pic3.zhimg.com/a.jpg)');
+    expect(calls.some((call) => call.url === '/blocks/pg9/children' && call.method === 'GET')).toBe(
+      true
+    );
+    expect(calls.some((call) => call.url === '/file_uploads' && call.method === 'POST')).toBe(true);
+    // One server-identity probe download + one browser-identity download of
+    // the actual bytes for the upload.
+    expect(download).toHaveBeenCalledTimes(2);
+    // The pre-signed upload URL is hit with a bare fetch (no auth headers).
+    expect(fetchMock).toHaveBeenCalledWith('https://upload.notion.com/fu1', expect.anything());
+    const patch = calls.find((call) => call.method === 'PATCH');
+    expect(patch.url).toBe('/blocks/b1');
+    expect(patch.data).toEqual({
+      image: { type: 'file_upload', file_upload: { id: 'fu1' } },
+    });
+  });
+
+  test('auto fails closed when the server-identity probe is unavailable', async () => {
+    // No IWebRequestService: nothing can be verified, so nothing is kept.
+    const download = installDownloader(async () => new Blob(['x'], { type: 'image/jpeg' }));
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ status: 'uploaded' }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { service, calls } = setup(
+      (url) => {
+        if (url === '/pages') {
+          return { data: { id: 'pg10', url: 'https://www.notion.so/pg10' } };
+        }
+        if (url === '/blocks/pg10/children') {
+          return {
+            data: {
+              results: [
+                {
+                  type: 'image',
+                  id: 'c1',
+                  image: { external: { url: 'https://cdn.example.com/a.jpg' } },
+                },
+              ],
+            },
+          };
+        }
+        if (url === '/file_uploads') {
+          return { data: { id: 'fu2', upload_url: 'https://upload.notion.com/fu2' } };
+        }
+        return { data: null };
+      },
+      { imageHandling: 'auto', rehostTarget: 'notion' }
+    );
+    await service.createDocument({
+      repositoryId: 'pg',
+      title: 'Unverifiable image',
+      content: '![img](https://cdn.example.com/a.jpg)',
+    });
+    const body = calls.find((call) => call.url === '/pages')!.data;
+    expect(body.markdown).toBe('![img](https://cdn.example.com/a.jpg)');
+    const patch = calls.find((call) => call.method === 'PATCH');
+    expect(patch.data).toEqual({
+      image: { type: 'file_upload', file_upload: { id: 'fu2' } },
+    });
+    // Only the browser-identity download for the upload; no probe happened.
+    expect(download).toHaveBeenCalledTimes(1);
   });
 
   test('a 401 is reported as an invalid token', async () => {

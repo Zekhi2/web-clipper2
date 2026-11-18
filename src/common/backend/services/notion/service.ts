@@ -1,19 +1,38 @@
 import localeService from '@/common/locales';
 import { CATEGORY_BOOKMARK, isBookmarkStub } from '@/common/clipCategory';
 import axios, { AxiosInstance } from 'axios';
+import Container from 'typedi';
+import { IBasicRequestService } from '@/service/common/request';
+import { IWebRequestService } from '@/service/common/webRequest';
 import { CreateDocumentRequest, DocumentService } from '../../index';
 import { CompleteStatus, UnauthorizedError } from './../interface';
 import { NotionRepository } from './types';
-import { buildCallout, parseFrontmatter, stripDuplicateHeading } from './frontmatter';
+import { buildCallout, normalizeImageBlocks, parseFrontmatter, stripDuplicateHeading } from './frontmatter';
+import {
+  SERVER_FETCH_USER_AGENT,
+  extensionForContentType,
+  extractImageUrls,
+  probeImageAccessibility,
+  replaceImageUrls,
+} from './imageHandling';
 
 const NOTION_API_BASE = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2026-03-11';
 const MAX_SEARCH_PAGES = 5;
+/** Guard against hung downloads during the accessibility probe. */
+const IMAGE_DOWNLOAD_TIMEOUT = 20000;
 
 type NotionObjectType = 'page' | 'database' | 'data_source';
 
+/** When images should be rehosted instead of keeping their original URLs. */
+type NotionImageHandling = 'auto' | 'always' | 'never';
+/** Where rehosted images go. */
+type NotionRehostTarget = 'auto' | 'imageHosting' | 'notion';
+
 interface NotionServiceConfig {
   personalAccessToken?: string;
+  imageHandling?: NotionImageHandling;
+  rehostTarget?: NotionRehostTarget;
 }
 
 interface NotionUserResponse {
@@ -110,6 +129,11 @@ export default class NotionDocumentService implements DocumentService {
   private me?: NotionUserResponse;
   /** Filled by getRepositories() so createDocument() can pick the right parent key. */
   private repositoryTypeMap: Record<string, NotionObjectType> = {};
+  /** Downloads performed during the image probe, reused when rehosting to
+   * Notion so blocked images are fetched only once. */
+  private imageBlobCache = new Map<string, Blob>();
+  private imageHandling: NotionImageHandling;
+  private rehostTarget: NotionRehostTarget;
 
   constructor(config: NotionServiceConfig = {}) {
     const token = (config.personalAccessToken || '').trim();
@@ -122,6 +146,8 @@ export default class NotionDocumentService implements DocumentService {
         })
       );
     }
+    this.imageHandling = config.imageHandling || 'auto';
+    this.rehostTarget = config.rehostTarget || 'auto';
     this.request = axios.create({
       baseURL: NOTION_API_BASE,
       timeout: 15000,
@@ -345,6 +371,223 @@ export default class NotionDocumentService implements DocumentService {
     }
   };
 
+  /** Download an image with the user's (browser) identity, for rehosting.
+   * The bytes the user's browser can fetch are what gets uploaded. Includes
+   * a timeout so a hung CDN cannot stall the whole clip. */
+  private downloadImage = (url: string): Promise<Blob> => {
+    const existing = this.imageBlobCache.get(url);
+    if (existing) {
+      return Promise.resolve(existing);
+    }
+    const timeout = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error(`image download timeout: ${url}`)), IMAGE_DOWNLOAD_TIMEOUT);
+    });
+    const download = (async () => {
+      const blob = await Container.get(IBasicRequestService).download(url);
+      this.imageBlobCache.set(url, blob);
+      return blob;
+    })();
+    return Promise.race([download, timeout]);
+  };
+
+  /**
+   * A downloader that presents the identity Notion's server-side fetcher
+   * would present (non-browser User-Agent), used for the accessibility
+   * probe only.
+   *
+   * The User-Agent header cannot be set by fetch/XHR in a browser context;
+   * the extension's `IWebRequestService` adds a temporary
+   * declarativeNetRequest rule that rewrites the header for a single request
+   * (scoped by a unique query parameter `changeUrl` appends). When the
+   * service is unavailable (tests, unsupported context) we return undefined
+   * and the probe fails closed: every image is treated as blocked, so auto
+   * mode never keeps an image it could not verify.
+   */
+  private getServerFetchDownloader =
+    (): ((url: string) => Promise<Blob>) | undefined => {
+      try {
+        const webRequestService = Container.get(IWebRequestService);
+        return async (url: string) => {
+          const header = await webRequestService.startChangeHeader({
+            urls: [url],
+            requestHeaders: [{ name: 'user-agent', value: SERVER_FETCH_USER_AGENT }],
+          });
+          try {
+            const scopedUrl = await webRequestService.changeUrl(url, header);
+            return await Container.get(IBasicRequestService).download(scopedUrl);
+          } finally {
+            await webRequestService.end(header);
+          }
+        };
+      } catch {
+        return undefined;
+      }
+    };
+
+  /** The user-configured image host, if any. Resolved lazily through the
+   * backend context to avoid a circular import at module-evaluation time. */
+  private getExternalImageService = async (): Promise<
+    { uploadImageUrl(url: string): Promise<string> } | undefined
+  > => {
+    try {
+      const backend = (await import('../../index')).default;
+      return backend.getImageHostingService();
+    } catch {
+      return undefined;
+    }
+  };
+
+  /**
+   * Classify every image in the markdown and rehost the blocked ones.
+   *
+   * - `never`: keep all original URLs.
+   * - `auto`: keep URLs that download as image content when fetched with a
+   *   server-side identity (what Notion's proxy presents), rehost the rest.
+   *   When the server-identity probe is unavailable, every image counts as
+   *   blocked so nothing unverified is kept.
+   * - `always`: rehost everything.
+   *
+   * Rehosting to the user's image host rewrites the markdown directly;
+   * rehosting to Notion requires the page to exist first, so those URLs are
+   * returned for post-creation attachment.
+   */
+  private handleImages = async (
+    markdown: string
+  ): Promise<{ markdown: string; notionUploads: string[] }> => {
+    if (this.imageHandling === 'never') {
+      return { markdown, notionUploads: [] };
+    }
+    const urls = extractImageUrls(markdown);
+    if (urls.length === 0) {
+      return { markdown, notionUploads: [] };
+    }
+
+    let blocked: string[];
+    if (this.imageHandling === 'always') {
+      blocked = urls;
+    } else {
+      const serverDownloader = this.getServerFetchDownloader();
+      if (!serverDownloader) {
+        blocked = urls;
+      } else {
+        const accessibility = await probeImageAccessibility(urls, serverDownloader);
+        blocked = urls.filter((url) => !accessibility.get(url));
+      }
+    }
+    if (blocked.length === 0) {
+      return { markdown, notionUploads: [] };
+    }
+
+    const externalService =
+      this.rehostTarget === 'notion' ? undefined : await this.getExternalImageService();
+    const preferExternal =
+      (this.rehostTarget === 'imageHosting' || this.rehostTarget === 'auto') &&
+      !!externalService;
+    const externalOnly = this.rehostTarget === 'imageHosting';
+    const allowNotionFallback = this.rehostTarget === 'auto' || this.rehostTarget === 'notion';
+
+    const mapping = new Map<string, string>();
+    const notionUploads: string[] = [];
+    for (const url of blocked) {
+      if (preferExternal && externalService) {
+        try {
+          const hosted = await externalService.uploadImageUrl(url);
+          if (hosted) {
+            mapping.set(url, hosted);
+            continue;
+          }
+        } catch {
+          // Fall through to the Notion upload when the image host rejects it.
+        }
+        if (externalOnly) {
+          continue; // Keep the original URL rather than uploading to Notion.
+        }
+      }
+      if (allowNotionFallback) {
+        notionUploads.push(url);
+      }
+    }
+    return { markdown: replaceImageUrls(markdown, mapping), notionUploads };
+  };
+
+  /** Upload an image to Notion's File Upload API. Returns the file upload id
+   * for attaching to a block, or null on failure. */
+  private uploadImageToNotion = async (url: string): Promise<string | null> => {
+    try {
+      const blob = await this.downloadImage(url);
+      const contentType = blob.type || 'image/jpeg';
+      const filename = `clipper-${Date.now()}.${extensionForContentType(contentType)}`;
+      const { data } = await this.request.post('/file_uploads', {
+        mode: 'single_part',
+        filename,
+        content_type: contentType,
+      });
+      if (!data || !data.id || !data.upload_url) {
+        return null;
+      }
+      const form = new FormData();
+      form.append('file', blob, filename);
+      // The upload URL is pre-signed: send it without the API auth headers.
+      const uploadResponse = await fetch(data.upload_url, { method: 'POST', body: form });
+      if (!uploadResponse.ok) {
+        return null;
+      }
+      const result = await uploadResponse.json().catch(() => null);
+      if (result && result.status && result.status !== 'uploaded') {
+        return null;
+      }
+      return data.id as string;
+    } catch {
+      return null;
+    }
+  };
+
+  /** Fetch every block of a page (paginated). */
+  private getAllBlockChildren = async (pageId: string): Promise<any[]> => {
+    const blocks: any[] = [];
+    let cursor: string | null = null;
+    do {
+      const { data } = await this.request.get(
+        `/blocks/${pageId}/children${cursor ? `?start_cursor=${cursor}` : ''}`
+      );
+      blocks.push(...((data && data.results) || []));
+      cursor = data && data.has_more ? data.next_cursor : null;
+    } while (cursor);
+    return blocks;
+  };
+
+  /** Replace image blocks whose external URL is in `urls` with Notion-hosted
+   * file uploads. Per-block failures are swallowed: the page keeps the
+   * original external URL, which degrades gracefully. */
+  private attachNotionUploads = async (pageId: string, urls: string[]): Promise<void> => {
+    if (urls.length === 0) {
+      return;
+    }
+    const pending = new Set(urls);
+    try {
+      const blocks = await this.getAllBlockChildren(pageId);
+      for (const block of blocks) {
+        const externalUrl = block?.image?.external?.url;
+        if (block?.type !== 'image' || !externalUrl || !pending.has(externalUrl)) {
+          continue;
+        }
+        const uploadId = await this.uploadImageToNotion(externalUrl);
+        if (!uploadId) {
+          continue;
+        }
+        try {
+          await this.request.patch(`/blocks/${block.id}`, {
+            image: { type: 'file_upload', file_upload: { id: uploadId } },
+          });
+        } catch {
+          // Keep the external image; it is better than losing the block.
+        }
+      }
+    } catch {
+      // Listing blocks failed: leave the page as created.
+    }
+  };
+
   createDocument = async ({
     title,
     content,
@@ -371,6 +614,9 @@ export default class NotionDocumentService implements DocumentService {
     // in an H1. Notion understands neither as metadata, so split it out.
     const { meta, body: article } = parseFrontmatter(content);
     const cleanArticle = Object.keys(meta).length > 0 ? stripDuplicateHeading(article, safeTitle) : article;
+    // Notion rejects inline, list-item and link-wrapped images; Obsidian does
+    // not. Split them into standalone image blocks before sending.
+    const normalizedArticle = normalizeImageBlocks(cleanArticle);
 
     // Bookmark clips wrap a tiny link stub. When the template has no explicit
     // category, classify them so the Category property stays accurate.
@@ -430,7 +676,20 @@ export default class NotionDocumentService implements DocumentService {
     // Fields with no matching Notion property go into a native callout block
     // so no metadata is silently lost.
     const callout = buildCallout(calloutMeta);
-    const markdown = [callout, cleanArticle.trim()].filter(Boolean).join('\n\n') || safeTitle;
+    let markdown = [callout, normalizedArticle.trim()].filter(Boolean).join('\n\n') || safeTitle;
+
+    // Notion loads external images through its own server-side proxy, so
+    // URLs with anti-bot protection break. Probe them and rehost the blocked
+    // ones (user's image host, or Notion's File Upload API) when enabled.
+    this.imageBlobCache.clear();
+    let notionUploads: string[] = [];
+    try {
+      const handled = await this.handleImages(markdown);
+      markdown = handled.markdown;
+      notionUploads = handled.notionUploads;
+    } catch {
+      // Keep the original markdown when the image pipeline fails.
+    }
 
     const body: Record<string, any> = {
       parent,
@@ -441,6 +700,11 @@ export default class NotionDocumentService implements DocumentService {
     };
 
     const { data } = await this.request.post<NotionCreatePageResponse>('/pages', body);
+    if (notionUploads.length > 0 && data && data.id) {
+      // Attached uploads live outside the critical path: a failure here
+      // leaves the page with its original (already created) image blocks.
+      await this.attachNotionUploads(data.id, notionUploads);
+    }
     return {
       href: data.url || `https://www.notion.so/${data.id.replace(/-/g, '')}`,
     };
