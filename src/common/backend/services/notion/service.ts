@@ -3,13 +3,12 @@ import { CATEGORY_BOOKMARK, isBookmarkStub } from '@/common/clipCategory';
 import axios, { AxiosInstance } from 'axios';
 import Container from 'typedi';
 import { IBasicRequestService } from '@/service/common/request';
-import { IWebRequestService } from '@/service/common/webRequest';
 import { CreateDocumentRequest, DocumentService } from '../../index';
 import { CompleteStatus, UnauthorizedError } from './../interface';
 import { NotionRepository } from './types';
 import { buildCallout, normalizeImageBlocks, parseFrontmatter, stripDuplicateHeading } from './frontmatter';
 import {
-  SERVER_FETCH_USER_AGENT,
+  buildNotionProbeUrl,
   extensionForContentType,
   extractImageUrls,
   probeImageAccessibility,
@@ -391,38 +390,15 @@ export default class NotionDocumentService implements DocumentService {
   };
 
   /**
-   * A downloader that presents the identity Notion's server-side fetcher
-   * would present (non-browser User-Agent), used for the accessibility
-   * probe only.
-   *
-   * The User-Agent header cannot be set by fetch/XHR in a browser context;
-   * the extension's `IWebRequestService` adds a temporary
-   * declarativeNetRequest rule that rewrites the header for a single request
-   * (scoped by a unique query parameter `changeUrl` appends). When the
-   * service is unavailable (tests, unsupported context) we return undefined
-   * and the probe fails closed: every image is treated as blocked, so auto
-   * mode never keeps an image it could not verify.
+   * Downloader used for the accessibility probe. Header-level simulation of
+   * Notion's fetcher is unreliable (sites fingerprint the whole client), so
+   * the probe goes through Notion's own image endpoint: it fetches the
+   * source server-side and returns the image only when Notion can display
+   * it. Errors and non-image responses count as blocked, so auto mode never
+   * keeps an unverifiable image.
    */
-  private getServerFetchDownloader =
-    (): ((url: string) => Promise<Blob>) | undefined => {
-      try {
-        const webRequestService = Container.get(IWebRequestService);
-        return async (url: string) => {
-          const header = await webRequestService.startChangeHeader({
-            urls: [url],
-            requestHeaders: [{ name: 'user-agent', value: SERVER_FETCH_USER_AGENT }],
-          });
-          try {
-            const scopedUrl = await webRequestService.changeUrl(url, header);
-            return await Container.get(IBasicRequestService).download(scopedUrl);
-          } finally {
-            await webRequestService.end(header);
-          }
-        };
-      } catch {
-        return undefined;
-      }
-    };
+  private probeDownload = (url: string): Promise<Blob> =>
+    Container.get(IBasicRequestService).download(buildNotionProbeUrl(url));
 
   /** The user-configured image host, if any. Resolved lazily through the
    * backend context to avoid a circular import at module-evaluation time. */
@@ -441,10 +417,9 @@ export default class NotionDocumentService implements DocumentService {
    * Classify every image in the markdown and rehost the blocked ones.
    *
    * - `never`: keep all original URLs.
-   * - `auto`: keep URLs that download as image content when fetched with a
-   *   server-side identity (what Notion's proxy presents), rehost the rest.
-   *   When the server-identity probe is unavailable, every image counts as
-   *   blocked so nothing unverified is kept.
+   * - `auto`: keep URLs that Notion's own image endpoint can actually fetch,
+   *   rehost the rest. An unreachable/failed probe is counted as blocked so
+   *   nothing unverified is kept.
    * - `always`: rehost everything.
    *
    * Rehosting to the user's image host rewrites the markdown directly;
@@ -466,13 +441,8 @@ export default class NotionDocumentService implements DocumentService {
     if (this.imageHandling === 'always') {
       blocked = urls;
     } else {
-      const serverDownloader = this.getServerFetchDownloader();
-      if (!serverDownloader) {
-        blocked = urls;
-      } else {
-        const accessibility = await probeImageAccessibility(urls, serverDownloader);
-        blocked = urls.filter((url) => !accessibility.get(url));
-      }
+      const accessibility = await probeImageAccessibility(urls, (url) => this.probeDownload(url));
+      blocked = urls.filter((url) => !accessibility.get(url));
     }
     if (blocked.length === 0) {
       return { markdown, notionUploads: [] };

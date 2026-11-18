@@ -4,17 +4,17 @@
  * Notion serves external images through its own server-side proxy, so an
  * image only displays when Notion's servers can fetch it. CDNs with
  * anti-bot/hotlink protection (zhihu's pic*.zhimg.com returns 567 for
- * non-browser user agents, for example) block that server-side fetch while
- * the same URL loads fine in a browser — so probing with the browser's own
- * identity would wrongly classify blocked images as accessible.
+ * non-browser user agents, eet-china's CDN black-holes unknown fetchers
+ * until they time out) block that server-side fetch while the same URL
+ * loads fine in a browser — so probing with the browser's own identity
+ * would wrongly classify blocked images as accessible.
  *
- * To match Notion's situation, probes are performed with the User-Agent
- * header rewritten to a non-browser value (via the extension's
- * declarativeNetRequest machinery, see
- * `service/webRequest/browser/background/tabService.ts`). An image is kept
- * as an external link only when that server-identity fetch succeeds; the
- * browser identity is used afterwards for actually obtaining the bytes when
- * rehosting, since the user can always download what they can see.
+ * Header-level simulation of Notion's fetcher cannot work either: sites
+ * like eet-china fingerprint the whole client (headers, TLS, network
+ * region), not just the user agent. The reliable oracle is Notion itself:
+ * `img.notionusercontent.com/ext/...` is the endpoint Notion's own clients
+ * use, it fetches the source server-side and returns the image on success.
+ * Probing through it answers exactly "can Notion display this image".
  *
  * Three user-facing behaviours build on the helpers here:
  * - probe: decide per image whether Notion can load the original URL;
@@ -23,12 +23,16 @@
  *   upload, then patching the created image blocks).
  */
 
-/** User-Agent sent for accessibility probes. Deliberately non-browser: the
- * probe must reproduce what Notion's server-side fetcher looks like to the
- * origin CDN, not what the user's browser looks like. When a CDN rejects
- * this identity we fail safe and rehost, so a false "blocked" only costs an
- * unnecessary rehost while a false "accessible" costs a broken image. */
-export const SERVER_FETCH_USER_AGENT = 'NotionClipper/1.0';
+/**
+ * Notion's public image endpoint. An unauthenticated request returns the
+ * image bytes (content type `image/*`) when Notion's server-side fetcher can
+ * load the source, and a small non-image error payload otherwise (e.g. 504
+ * for a source that black-holes the fetch, 404 for a dead link).
+ */
+export const NOTION_IMAGE_PROBE_HOST = 'https://img.notionusercontent.com';
+
+export const buildNotionProbeUrl = (url: string): string =>
+  `${NOTION_IMAGE_PROBE_HOST}/ext/${encodeURIComponent(url)}/size/?mtd=so`;
 
 /** Unique http(s) image URLs in a markdown document, in first-appearance
  * order. Data URIs are ignored. */
@@ -64,7 +68,8 @@ export const isImageBlobAccessible = (blob?: Blob | null): boolean =>
 
 /** Classify every URL. Results arrive in parallel; one failing URL never
  * affects the others. Every download is performed through `download`, which
- * must present a server-side identity (see `SERVER_FETCH_USER_AGENT`). */
+ * must ask Notion's own image endpoint so the verdict matches what Notion's
+ * server-side fetcher actually gets. */
 export const probeImageAccessibility = async (
   urls: string[],
   download: ImageDownloader,

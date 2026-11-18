@@ -3,8 +3,7 @@ import axios from 'axios';
 import Container from 'typedi';
 import NotionDocumentService from '@/common/backend/services/notion/service';
 import { IBasicRequestService } from '@/service/common/request';
-import { IWebRequestService } from '@/service/common/webRequest';
-import { SERVER_FETCH_USER_AGENT } from '@/common/backend/services/notion/imageHandling';
+import { buildNotionProbeUrl } from '@/common/backend/services/notion/imageHandling';
 
 vi.mock('@/common/locales', () => ({
   default: {
@@ -64,31 +63,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   Container.remove(IBasicRequestService);
-  Container.remove(IWebRequestService);
 });
-
-/**
- * A fake of the extension's declarativeNetRequest header rewriting
- * (`src/service/webRequest/browser/background/tabService.ts`): headers are
- * "rewritten" for one request whose URL carries the returned marker query.
- */
-function installServerFetchProbe() {
-  const headerChanges: Array<Array<{ name: string; value: string }>> = [];
-  const webRequest = {
-    startChangeHeader: vi.fn(async ({ requestHeaders }: any) => {
-      headerChanges.push(requestHeaders);
-      return { name: 'probe', value: 'uuid-1' };
-    }),
-    changeUrl: vi.fn(
-      async (url: string, header: { name: string; value: string }) =>
-        `${url}${url.includes('?') ? '&' : '?'}${header.name}=${header.value}`
-    ),
-    end: vi.fn(async () => {}),
-    requestInBackground: vi.fn(),
-  };
-  Container.set(IWebRequestService, webRequest as any);
-  return { webRequest, headerChanges };
-}
 
 function installDownloader(
   fn: (url: string) => Promise<Blob>
@@ -413,8 +388,7 @@ describe('NotionDocumentService (official REST API + PAT)', () => {
     expect(body.markdown).toBe('see\n\n![img](https://example.com/a.jpg)\n\nhere');
   });
 
-  test('auto probes with a server identity and keeps original URLs for accessible images', async () => {
-    const { headerChanges } = installServerFetchProbe();
+  test('auto probes through Notion and keeps original URLs for images Notion can fetch', async () => {
     const download = installDownloader(async () => new Blob(['x'], { type: 'image/jpeg' }));
     const { service, calls } = setup((url) => {
       if (url === '/pages') {
@@ -427,13 +401,10 @@ describe('NotionDocumentService (official REST API + PAT)', () => {
       title: 'Accessible image',
       content: '![img](https://cdn.example.com/a.jpg)',
     });
-    // The probe fetches with the rewritten non-browser User-Agent header.
-    expect(headerChanges).toEqual([
-      [{ name: 'user-agent', value: SERVER_FETCH_USER_AGENT }],
-    ]);
-    // One probe download, no rehosting traffic (only the parent-type GET and
-    // the page POST).
+    // The probe went through Notion's own image endpoint, not the source URL.
     expect(download).toHaveBeenCalledTimes(1);
+    expect(download.mock.calls[0][0]).toBe(buildNotionProbeUrl('https://cdn.example.com/a.jpg'));
+    // No rehosting traffic (only the parent-type GET and the page POST).
     expect(calls.every((call) => call.url === '/pages' || call.url === '/pages/pg')).toBe(true);
     const body = calls.find((call) => call.url === '/pages')!.data;
     expect(body.markdown).toBe('![img](https://cdn.example.com/a.jpg)');
@@ -460,13 +431,13 @@ describe('NotionDocumentService (official REST API + PAT)', () => {
     expect(calls.every((call) => call.url === '/pages' || call.url === '/pages/pg')).toBe(true);
   });
 
-  test('server-blocked images are rehosted through the Notion File Upload API', async () => {
-    installServerFetchProbe();
-    // Probe requests (scoped by the marker query) hit the CDN's anti-bot
-    // rejection page; the browser identity can still fetch the real bytes.
+  test('images Notion cannot fetch are rehosted through the Notion File Upload API', async () => {
+    // Notion's image endpoint reports a failure for the source (e.g. the
+    // 504 returned by anti-bot CDNs); the browser identity can still fetch
+    // the real bytes from the source URL for the upload.
     const download = installDownloader(async (url) =>
-      url.includes('probe=')
-        ? new Blob(['<html>567</html>'], { type: 'text/html' })
+      url.startsWith('https://img.notionusercontent.com/')
+        ? new Blob(['504'], { type: 'application/octet-stream' })
         : new Blob(['x'], { type: 'image/jpeg' })
     );
     const fetchMock = vi.fn(async () => ({
@@ -513,7 +484,7 @@ describe('NotionDocumentService (official REST API + PAT)', () => {
       true
     );
     expect(calls.some((call) => call.url === '/file_uploads' && call.method === 'POST')).toBe(true);
-    // One server-identity probe download + one browser-identity download of
+    // One Notion probe download + one browser-identity download of
     // the actual bytes for the upload.
     expect(download).toHaveBeenCalledTimes(2);
     // The pre-signed upload URL is hit with a bare fetch (no auth headers).
@@ -525,9 +496,15 @@ describe('NotionDocumentService (official REST API + PAT)', () => {
     });
   });
 
-  test('auto fails closed when the server-identity probe is unavailable', async () => {
-    // No IWebRequestService: nothing can be verified, so nothing is kept.
-    const download = installDownloader(async () => new Blob(['x'], { type: 'image/jpeg' }));
+  test('auto fails closed when the Notion probe itself fails', async () => {
+    // The probe request errors before returning any verdict: nothing can be
+    // verified, so nothing is kept.
+    const download = installDownloader(async (url) => {
+      if (url.startsWith('https://img.notionusercontent.com/')) {
+        throw new Error('probe endpoint unreachable');
+      }
+      return new Blob(['x'], { type: 'image/jpeg' });
+    });
     const fetchMock = vi.fn(async () => ({
       ok: true,
       json: async () => ({ status: 'uploaded' }),
@@ -569,8 +546,8 @@ describe('NotionDocumentService (official REST API + PAT)', () => {
     expect(patch.data).toEqual({
       image: { type: 'file_upload', file_upload: { id: 'fu2' } },
     });
-    // Only the browser-identity download for the upload; no probe happened.
-    expect(download).toHaveBeenCalledTimes(1);
+    // One failed Notion probe + one browser-identity download for the upload.
+    expect(download).toHaveBeenCalledTimes(2);
   });
 
   test('a 401 is reported as an invalid token', async () => {

@@ -86,7 +86,7 @@
   "backend.services.notion.form.share.step3": "3. Confirm, then click Verify below. Otherwise the repository list stays empty.",
   "backend.services.notion.form.imageHandling.label": "Image handling",
   "backend.services.notion.form.imageHandling.help": "Notion loads external images through its own servers, and some sites (e.g. zhihu's image CDN) block that request so images break.",
-  "backend.services.notion.form.imageHandling.auto": "Auto: keep original links, rehost blocked ones",
+  "backend.services.notion.form.imageHandling.auto": "Auto: rehost only what Notion cannot actually load",
   "backend.services.notion.form.imageHandling.always": "Always rehost all images",
   "backend.services.notion.form.imageHandling.never": "Never rehost (keep original links)",
   "backend.services.notion.form.rehostTarget.label": "Rehost destination",
